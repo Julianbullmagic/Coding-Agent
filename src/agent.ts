@@ -443,10 +443,12 @@ export class CodingAgent {
                 },
             ];
 
+        const scopedInstructions = SYSTEM_PROMPT + ' The workspace folder you may access is exactly: ' + JSON.stringify(workspacePath) + '. Use list_files, read_file, write_file, and create_directory relative to this folder only. Do not read or modify anything outside it.';
+
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
             const requestBody: string = JSON.stringify({
                 model: this.modelId,
-                instructions: SYSTEM_PROMPT,
+                instructions: scopedInstructions,
                 input,
                 reasoning: { effort: 'none' },
                 max_output_tokens: 8192,

@@ -58,10 +58,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
     }
 
     private conversations(): Conversation[] {
-        const workspaceConversations = this.context.workspaceState.get<Conversation[]>('codingAgent.conversations', []);
-        const stored = workspaceConversations.length > 0
-            ? workspaceConversations
-            : this.context.globalState.get<Conversation[]>('codingAgent.conversations', []);
+        const stored = this.context.workspaceState.get<Conversation[]>('codingAgent.conversations', []);
         const summarized = stored.map((conversation) => ({
             ...conversation,
             title: summarizeConversation(conversation.messages),
@@ -80,22 +77,18 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
     }
 
     private active(): Conversation | undefined {
-        const activeId = this.context.workspaceState.get<string>('codingAgent.activeConversation')
-            ?? this.context.globalState.get<string>('codingAgent.activeConversation');
+        const activeId = this.context.workspaceState.get<string>('codingAgent.activeConversation');
         return this.conversations().find((conversation) => conversation.id === activeId) ?? this.conversations()[0];
     }
 
     private async deleteConversation(conversationId: string): Promise<void> {
         const remaining = this.conversations().filter((conversation) => conversation.id !== conversationId);
         await this.context.workspaceState.update('codingAgent.conversations', remaining);
-        await this.context.globalState.update('codingAgent.conversations', remaining);
 
-        const activeId = this.context.workspaceState.get<string>('codingAgent.activeConversation')
-            ?? this.context.globalState.get<string>('codingAgent.activeConversation');
+        const activeId = this.context.workspaceState.get<string>('codingAgent.activeConversation');
         if (activeId === conversationId) {
             const nextId = remaining[0]?.id;
             await this.context.workspaceState.update('codingAgent.activeConversation', nextId);
-            await this.context.globalState.update('codingAgent.activeConversation', nextId);
         }
     }
 
@@ -107,7 +100,6 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             updatedAt: Date.now(),
         } : conversation);
         await this.context.workspaceState.update('codingAgent.conversations', updated);
-        await this.context.globalState.update('codingAgent.conversations', updated);
     }
 
     private async send(view: vscode.WebviewView, text: string): Promise<void> {
@@ -143,7 +135,13 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         try {
             const searxngBaseUrl = vscode.workspace.getConfiguration('codingAgent').get<string>('searxngBaseUrl', 'http://localhost:8080');
             const maxToolRounds = vscode.workspace.getConfiguration('codingAgent').get<number>('maxToolRounds', 1000);
-            const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+            const folder = vscode.workspace.workspaceFolders?.[0];
+            if (!folder) {
+                await this.save(conversation.id, [...messages, { role: 'assistant', content: 'Open a folder or workspace before chatting so I can see your files.' }]);
+                this.postState(view);
+                return;
+            }
+            const workspacePath = folder.uri.fsPath;
             const response = await this.agent.provideSuggestions(text, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds);
             await this.save(conversation.id, [...messages, { role: 'assistant', content: response.trim() }]);
         } catch (error) {
@@ -413,8 +411,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const newConversation = vscode.commands.registerCommand('codingAgent.newConversation', async () => {
-        const conversations = context.workspaceState.get<Conversation[]>('codingAgent.conversations', [])
-            ?? context.globalState.get<Conversation[]>('codingAgent.conversations', []);
+        const conversations = context.workspaceState.get<Conversation[]>('codingAgent.conversations', []);
         const conversation: Conversation = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             title: 'New conversation',
