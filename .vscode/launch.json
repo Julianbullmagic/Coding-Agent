@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Coding Agent Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/coding-agent-extension",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/coding-agent-extension"],
+      "outFiles": ["${workspaceFolder}/coding-agent-extension/out/**/*.js"],
+      "preLaunchTask": "Coding Agent: compile"
+    }
+  ]
+}

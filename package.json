@@ -1,0 +1,123 @@
+{
+  "name": "coding-agent-extension",
+  "displayName": "Coding Agent Extension",
+  "description": "A DeepSeek coding assistant with web search and SearXNG browsing.",
+  "version": "0.1.2",
+  "publisher": "your-name",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/src/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && mocha ./out/test/*.test.js"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codingAgent",
+          "title": "Coding Agent",
+          "icon": "resources/coding-agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "codingAgent": [
+        {
+          "type": "webview",
+          "id": "codingAgent.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Coding Agent",
+      "properties": {
+        "codingAgent.searxngBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL of your SearXNG instance. Enable the JSON search format on that instance."
+        },
+        "codingAgent.autoStartSearxng": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the bundled local SearXNG Docker service automatically when VS Code starts."
+        },
+        "codingAgent.autoInstallDocker": {
+          "type": "boolean",
+          "default": true,
+          "description": "Install Docker Desktop automatically with Windows Package Manager when Docker is missing."
+        },
+        "codingAgent.maxToolRounds": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum number of tool-operation rounds allowed for one Coding Agent turn."
+        },
+        "codingAgent.model": {
+          "type": "string",
+          "default": "deepseek-v4-pro",
+          "description": "DeepSeek model used by the extension. The startup check may update this setting."
+        },
+        "codingAgent.autoCheckModelUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check DeepSeek documentation and update the configured model when the extension opens."
+        },
+        "codingAgent.autoBackupToGitHub": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically commit and push workspace changes to a GitHub repository on an interval. Requires an authenticated GitHub CLI (run 'Coding Agent: Sign in to GitHub')."
+        },
+        "codingAgent.autoBackupIntervalMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "How often (in minutes) to automatically back up the workspace to GitHub."
+        },
+        "codingAgent.promptForGitHubLogin": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a status-bar indicator for GitHub login state and prompt to sign in when credentials are missing or expired."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "codingAgent.askDeepSeek",
+        "title": "Coding Agent: Ask DeepSeek"
+      },
+      {
+        "command": "codingAgent.setApiKey",
+        "title": "Coding Agent: Set DeepSeek API Key"
+      },
+      {
+        "command": "codingAgent.newConversation",
+        "title": "Coding Agent: New Conversation"
+      },
+      {
+        "command": "codingAgent.loginGitHub",
+        "title": "Coding Agent: Sign in to GitHub"
+      },
+      {
+        "command": "codingAgent.backupNow",
+        "title": "Coding Agent: Back Up to GitHub Now"
+      }
+    ]
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "@types/vscode": "^1.90.0",
+    "mocha": "^10.4.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^18.19.0"
+  }
+}

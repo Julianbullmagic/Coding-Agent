@@ -1,0 +1,10 @@
+.vscode/**
+.git/**
+test/**
+src/**/*.tmp
+**/*.map
+node_modules/**
+**/*.vsix
+!docker-compose.yml
+!searxng/**
+!searxng/settings.yml
