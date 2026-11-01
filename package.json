@@ -73,7 +73,7 @@
         },
         "codingAgent.autoBackupToGitHub": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Automatically commit and push workspace changes to a GitHub repository on an interval. Requires an authenticated GitHub CLI (run 'Coding Agent: Sign in to GitHub')."
         },
         "codingAgent.autoBackupIntervalMinutes": {

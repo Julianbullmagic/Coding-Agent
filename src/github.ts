@@ -10,7 +10,7 @@ export type StatusBarController = {
 
 /**
  * Manages a status-bar indicator that shows the current GitHub login state, and
- * (when credentials are missing or expired) prompts the user to sign in.
+ * (when credentials are missing, expired, or unverifiable) prompts the user to sign in.
  */
 export function createGitHubStatusBar(): StatusBarController {
     const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -46,13 +46,22 @@ export function createGitHubStatusBar(): StatusBarController {
     };
 
     const promptIfNeeded = async (status: GitHubAuthStatus): Promise<void> => {
-        if (status.state !== 'not-authenticated') return;
+        // Prompt whenever there are no valid credentials, including when the
+        // GitHub CLI itself is missing or the auth state cannot be verified.
+        if (status.state === 'installed') return;
         if (prompting) return;
         prompting = true;
         try {
-            const label = status.reason === 'expired'
-                ? 'Your GitHub credentials have expired.'
-                : 'Sign in to GitHub to enable automatic backups and repository tools.';
+            let label: string;
+            if (status.state === 'not-installed') {
+                label = 'GitHub CLI (gh) is not installed, which is required for GitHub backups.';
+            } else if (status.state === 'not-authenticated') {
+                label = status.reason === 'expired'
+                    ? 'Your GitHub credentials have expired.'
+                    : 'Sign in to GitHub to enable automatic backups and repository tools.';
+            } else {
+                label = 'GitHub authentication could not be checked.';
+            }
             const choice = await vscode.window.showWarningMessage(
                 `${label} Sign in now?`,
                 'Sign in to GitHub',
