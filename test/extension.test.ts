@@ -1,9 +1,9 @@
 import { strict as assert } from 'assert';
-import { buildRequestBody, buildSearxngSearchUrl } from '../src/agent';
+import { buildRequestBody } from '../src/agent';
 import { parsePromptInput } from '../src/tools';
 
 describe('DeepSeek request helpers', () => {
-    it('enables DeepSeek web search and SearXNG tools', () => {
+    it('enables DeepSeek web search and workspace/GitHub tools', () => {
         const request = JSON.parse(buildRequestBody('Explain this function')) as {
             model: string;
             tools: Array<{ type: string; name?: string }>;
@@ -13,7 +13,6 @@ describe('DeepSeek request helpers', () => {
         assert.equal(request.model, 'deepseek-v4-pro');
         assert.equal(request.input, 'Explain this function');
         assert.ok(request.tools.some((tool) => tool.type === 'web_search'));
-        assert.ok(request.tools.some((tool) => tool.name === 'search_searxng'));
         assert.ok(request.tools.some((tool) => tool.name === 'fetch_page'));
         assert.ok(request.tools.some((tool) => tool.name === 'create_github_repository'));
         assert.ok(request.tools.some((tool) => tool.name === 'commit_and_push'));
@@ -25,15 +24,11 @@ describe('DeepSeek request helpers', () => {
         assert.ok(request.tools.some((tool) => tool.name === 'run_command'));
     });
 
-    it('builds a SearXNG JSON search URL', () => {
-        const url = buildSearxngSearchUrl('http://localhost:8080/', 'vscode extension');
-        assert.equal(url.pathname, '/search');
-        assert.equal(url.searchParams.get('q'), 'vscode extension');
-        assert.equal(url.searchParams.get('format'), 'json');
-    });
-
-    it('rejects SearXNG URLs with embedded credentials', () => {
-        assert.throws(() => buildSearxngSearchUrl('http://user:pass@example.org', 'query'));
+    it('does not expose the SearXNG tool (disabled)', () => {
+        const request = JSON.parse(buildRequestBody('Explain this function')) as {
+            tools: Array<{ type: string; name?: string }>;
+        };
+        assert.ok(!request.tools.some((tool) => tool.name === 'search_searxng'));
     });
 
     it('trims whitespace from prompts', () => {
