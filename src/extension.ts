@@ -5,6 +5,7 @@ import { ensureLocalSearxng } from './searxng';
 import { checkLatestModel } from './model-check';
 import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
+import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
 
@@ -274,7 +275,7 @@ export function activate(context: vscode.ExtensionContext) {
     const loginGitHub = vscode.commands.registerCommand('codingAgent.loginGitHub', async () => {
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
-            name: 'GitHub Sign In',
+            name: LOGIN_TERMINAL_NAME,
             cwd: workspacePath || undefined,
             hideFromUser: false,
         });
@@ -284,16 +285,15 @@ export function activate(context: vscode.ExtensionContext) {
         // code. Running it in a visible terminal lets the user see that code,
         // complete the browser flow, and lets gh poll until authorization
         // succeeds -- the natural interactive experience.
-        terminal.sendText('gh auth login --hostname github.com --git-protocol https --web');
+        terminal.sendText(LOGIN_COMMAND);
 
         // Poll for completion so we can refresh the status bar and finish setup.
         const started = Date.now();
-        const timeoutMs = 5 * 60 * 1000;
+        const timeoutMs = LOGIN_POLL_TIMEOUT_MS;
         const poll = async (): Promise<void> => {
-            if (Date.now() - started > timeoutMs) {
+            if (!shouldKeepPolling(started, Date.now(), timeoutMs)) {
                 void vscode.window.showWarningMessage(
-                    'GitHub sign-in is still in progress in the "GitHub Sign In" terminal. ' +
-                    'Finish the browser flow, then the status bar will update automatically.',
+                    buildLoginTimeoutWarning(),
                 );
                 return;
             }
@@ -301,11 +301,11 @@ export function activate(context: vscode.ExtensionContext) {
                 await vscode.commands.executeCommand('codingAgent.configureGitIdentity');
                 await githubStatusBar.refresh();
                 void vscode.window.showInformationMessage(
-                    'Signed in to GitHub and configured Git authentication.',
+                    buildLoginSuccessMessage(),
                 );
                 return;
             }
-            setTimeout(() => { void poll(); }, 3000);
+            setTimeout(() => { void poll(); }, nextPollDelay(LOGIN_POLL_INTERVAL_MS));
         };
         void poll();
     });
