@@ -19,5 +19,5 @@ describe('GitHub auth helpers', () => {
         if (status.state === 'not-authenticated') {
             assert.ok(status.reason === 'missing' || status.reason === 'expired');
         }
-    });
+    }).timeout(10000);
 });

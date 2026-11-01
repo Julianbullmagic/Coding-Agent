@@ -66,6 +66,57 @@ export function slugifyRepoName(name: string): string {
 }
 
 /**
+ * True when the GitHub CLI reported that a repository name is already taken.
+ * gh prints messages like "name already exists on this account" or a URL with
+ * "already exists" and exits non-zero.
+ */
+export function isRepoNameCollision(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return message.includes('already exists') || message.includes('name already exists');
+}
+
+/**
+ * Deterministically generate the next candidate name on a collision, e.g.
+ * "my-repo" -> "my-repo-2" -> "my-repo-3" ...
+ */
+export function nextCollisionName(base: string, attempt: number): string {
+    return `${base}-${attempt}`;
+}
+
+async function ghCreateRepo(name: string, cwd: string): Promise<void> {
+    await run(
+        'gh',
+        ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--private', '--push'],
+        cwd,
+    );
+}
+
+/**
+ * Create a private GitHub repository, retrying with a numeric suffix when the
+ * base name is already taken. After several failures, it hands control back to
+ * the caller which may prompt the user for an explicit name.
+ */
+export async function createRepoWithRetry(
+    base: string,
+    cwd: string,
+    maxAttempts = 5,
+): Promise<{ name: string; branch: string }> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const name = attempt === 1 ? base : nextCollisionName(base, attempt);
+        try {
+            await ghCreateRepo(name, cwd);
+            const branch = (await currentBranch(cwd)) || 'main';
+            return { name, branch };
+        } catch (error) {
+            lastError = error;
+            if (!isRepoNameCollision(error)) throw error;
+        }
+    }
+    throw new Error(`Repository name "${base}" is already taken: ${String(lastError)}`);
+}
+
+/**
  * Ensure the workspace folder is a Git repository hosted on GitHub.
  *
  * Detects the "no repo" state (no `.git`, or `.git` but no `origin` remote) and
@@ -102,15 +153,10 @@ export async function ensureRepoOnOpen(cwd: string, folderName: string): Promise
         }
     }
 
-    const branch = (await currentBranch(cwd)) || 'main';
-    await run(
-        'gh',
-        ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--private', '--push'],
-        cwd,
-    );
+    const { name: createdName, branch } = await createRepoWithRetry(name, cwd);
 
     return {
         action: 'created-repo',
-        message: `Created private repository "${name}" and pushed ${branch} to GitHub.`,
+        message: `Created private repository "${createdName}" and pushed ${branch} to GitHub.`,
     };
 }

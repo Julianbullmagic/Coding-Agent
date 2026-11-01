@@ -6,6 +6,7 @@ import { checkLatestModel } from './model-check';
 import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
 import { ensureRepoOnOpen } from './repo-bootstrap';
+import { detectWorkspaceFolder } from './path-detection';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
@@ -135,7 +136,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         try {
             const searxngBaseUrl = vscode.workspace.getConfiguration('codingAgent').get<string>('searxngBaseUrl', 'http://localhost:8080');
             const maxToolRounds = vscode.workspace.getConfiguration('codingAgent').get<number>('maxToolRounds', 1000);
-            const folder = vscode.workspace.workspaceFolders?.[0];
+            const folder = detectWorkspaceFolder();
             if (!folder) {
                 await this.save(conversation.id, [...messages, { role: 'assistant', content: 'Open a folder or workspace before chatting so I can see your files.' }]);
                 this.postState(view);
@@ -165,7 +166,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
 }
 
 function startAutoBackup(context: vscode.ExtensionContext): { dispose(): void } {
-    const workspacePath = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const workspacePath = () => detectWorkspaceFolder()?.uri.fsPath ?? '';
     let timer: ReturnType<typeof setInterval> | undefined;
     let running = false;
 
@@ -211,7 +212,7 @@ export function activate(context: vscode.ExtensionContext) {
     const agent = new CodingAgent(config.get<string>('model', 'deepseek-v4-pro'));
 
     void (async () => {
-        const folder = vscode.workspace.workspaceFolders?.[0];
+        const folder = detectWorkspaceFolder();
         if (!folder) return;
         try {
             const result = await ensureRepoOnOpen(folder.uri.fsPath, folder.name);
@@ -287,7 +288,7 @@ export function activate(context: vscode.ExtensionContext) {
 //     }
 
     const loginGitHub = vscode.commands.registerCommand('codingAgent.loginGitHub', async () => {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const workspacePath = detectWorkspaceFolder()?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
             name: LOGIN_TERMINAL_NAME,
             cwd: workspacePath || undefined,
@@ -311,7 +312,7 @@ export function activate(context: vscode.ExtensionContext) {
                 );
                 return;
             }
-            if (await isGitHubAuthenticated(workspacePath ?? process.cwd())) {
+            if (await isGitHubAuthenticated(workspacePath ?? '')) {
                 await vscode.commands.executeCommand('codingAgent.configureGitIdentity');
                 await githubStatusBar.refresh();
                 void vscode.window.showInformationMessage(
@@ -325,7 +326,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const configureGitIdentity = vscode.commands.registerCommand('codingAgent.configureGitIdentity', async () => {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const workspacePath = detectWorkspaceFolder()?.uri.fsPath;
         if (!workspacePath) {
             void vscode.window.showWarningMessage('Open a folder or workspace before configuring Git identity.');
             return;
@@ -375,7 +376,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(autoBackupTimer);
 
     const backupNow = vscode.commands.registerCommand('codingAgent.backupNow', async () => {
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+        const workspacePath = detectWorkspaceFolder()?.uri.fsPath ?? '';
         try {
             const result = await backupWorkspaceToGitHub(workspacePath, 'coding-agent-backup');
             void vscode.window.showInformationMessage(result.message);
