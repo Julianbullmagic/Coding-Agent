@@ -2,7 +2,7 @@
   "name": "coding-agent-extension",
   "displayName": "Coding Agent Extension",
   "description": "A DeepSeek coding assistant with web search and SearXNG browsing.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "your-name",
   "engines": {
     "vscode": "^1.90.0"
