@@ -7,6 +7,7 @@ import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
 import { ensureRepoOnOpen } from './repo-bootstrap';
 import { detectWorkspaceFolder } from './path-detection';
+import { RagConversation, retrieveRelevantContext, shouldRetrieve, formatRetrievedContext } from './rag';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
@@ -151,7 +152,20 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
                 return;
             }
             const workspacePath = folder.uri.fsPath;
-            const response = await this.agent.provideSuggestions(text, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds);
+            let effectivePrompt = text;
+            if (shouldRetrieve(text)) {
+                const results = retrieveRelevantContext({
+                    query: text,
+                    conversations: this.conversations(),
+                    excludeConversationId: conversation.id,
+                    limit: 3,
+                });
+                const contextBlock = formatRetrievedContext(results);
+                if (contextBlock) {
+                    effectivePrompt = contextBlock + '\n\n---\n\nUser request: ' + text;
+                }
+            }
+            const response = await this.agent.provideSuggestions(effectivePrompt, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds);
             await this.save(conversation.id, [...messages, { role: 'assistant', content: response.trim() }]);
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
@@ -229,7 +243,17 @@ function startAutoBackup(context: vscode.ExtensionContext): { dispose(): void } 
 
 export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('codingAgent');
-    const agent = new CodingAgent(config.get<string>('model', 'deepseek-v4-pro'));
+    const agent = new CodingAgent(
+        config.get<string>('model', 'deepseek-v4-pro'),
+        () => {
+            const stored = context.workspaceState.get<RagConversation[]>('codingAgent.conversations', []);
+            return stored.map((conversation) => ({
+                ...conversation,
+                title: summarizeConversation(conversation.messages),
+            }));
+        },
+        () => context.workspaceState.get<string>('codingAgent.activeConversation'),
+    );
 
     void (async () => {
         const folder = detectWorkspaceFolder();

@@ -22,6 +22,7 @@ describe('DeepSeek request helpers', () => {
         assert.ok(request.tools.some((tool) => tool.name === 'write_file'));
         assert.ok(request.tools.some((tool) => tool.name === 'create_directory'));
         assert.ok(request.tools.some((tool) => tool.name === 'run_command'));
+        assert.ok(request.tools.some((tool) => tool.name === 'retrieve_relevant_context'));
     });
 
     it('does not expose the SearXNG tool (disabled)', () => {
