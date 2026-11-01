@@ -92,9 +92,7 @@ export async function backupWorkspaceToGitHub(cwd: string, repoName: string): Pr
             'gh',
             ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--private', '--push'],
             cwd,
-        ).catch(async () => {
-            await run('gh', ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--public', '--push'], cwd);
-        });
+        );
         return { ok: true, action: 'created-repo', message: `Created GitHub repository "${name}" and pushed.` };
     }
 

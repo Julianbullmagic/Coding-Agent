@@ -5,6 +5,7 @@ import { CodingAgent } from './agent';
 import { checkLatestModel } from './model-check';
 import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
+import { ensureRepoOnOpen } from './repo-bootstrap';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
@@ -210,6 +211,21 @@ function startAutoBackup(context: vscode.ExtensionContext): { dispose(): void } 
 export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('codingAgent');
     const agent = new CodingAgent(config.get<string>('model', 'deepseek-v4-pro'));
+
+    void (async () => {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) return;
+        try {
+            const result = await ensureRepoOnOpen(folder.uri.fsPath, folder.name);
+            if (result.action === 'created-repo') {
+                void vscode.window.showInformationMessage(result.message);
+            }
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : 'Unknown repo bootstrap error';
+            void vscode.window.showWarningMessage('GitHub repo bootstrap failed: ' + detail);
+        }
+    })();
+
 
     const githubStatusBar = createGitHubStatusBar();
     context.subscriptions.push(githubStatusBar);
