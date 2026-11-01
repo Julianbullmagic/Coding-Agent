@@ -272,34 +272,42 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const loginGitHub = vscode.commands.registerCommand('codingAgent.loginGitHub', async () => {
-        await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: 'Signing in to GitHub', cancellable: false },
-            () => new Promise<void>((resolve) => {
-                const login = spawn('gh', ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], {
-                    cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-                    env: process.env,
-                    windowsHide: true,
-                });
-                let output = '';
-                login.stdout?.on('data', (chunk: Buffer | string) => { output += chunk.toString(); });
-                login.stderr?.on('data', (chunk: Buffer | string) => { output += chunk.toString(); });
-                login.once('error', () => {
-                    void vscode.window.showErrorMessage('GitHub CLI is not installed. Install it from https://cli.github.com/ and try again.');
-                    resolve();
-                });
-                login.once('close', async (code) => {
-                    if (code !== 0) {
-                        void vscode.window.showErrorMessage(output.trim() || 'GitHub sign-in did not complete.');
-                        resolve();
-                        return;
-                    }
-                    await vscode.commands.executeCommand('codingAgent.configureGitIdentity');
-                    await githubStatusBar.refresh();
-                    void vscode.window.showInformationMessage('Signed in to GitHub and configured Git authentication.');
-                    resolve();
-                });
-            }),
-        );
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const terminal = vscode.window.createTerminal({
+            name: 'GitHub Sign In',
+            cwd: workspacePath || undefined,
+            hideFromUser: false,
+        });
+        terminal.show();
+
+        // gh auth login --web opens the browser and prints a one-time device
+        // code. Running it in a visible terminal lets the user see that code,
+        // complete the browser flow, and lets gh poll until authorization
+        // succeeds -- the natural interactive experience.
+        terminal.sendText('gh auth login --hostname github.com --git-protocol https --web');
+
+        // Poll for completion so we can refresh the status bar and finish setup.
+        const started = Date.now();
+        const timeoutMs = 5 * 60 * 1000;
+        const poll = async (): Promise<void> => {
+            if (Date.now() - started > timeoutMs) {
+                void vscode.window.showWarningMessage(
+                    'GitHub sign-in is still in progress in the "GitHub Sign In" terminal. ' +
+                    'Finish the browser flow, then the status bar will update automatically.',
+                );
+                return;
+            }
+            if (await isGitHubAuthenticated(workspacePath ?? process.cwd())) {
+                await vscode.commands.executeCommand('codingAgent.configureGitIdentity');
+                await githubStatusBar.refresh();
+                void vscode.window.showInformationMessage(
+                    'Signed in to GitHub and configured Git authentication.',
+                );
+                return;
+            }
+            setTimeout(() => { void poll(); }, 3000);
+        };
+        void poll();
     });
 
     const configureGitIdentity = vscode.commands.registerCommand('codingAgent.configureGitIdentity', async () => {
