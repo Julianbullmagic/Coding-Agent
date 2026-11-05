@@ -13,21 +13,13 @@ interface ResponseOutputItem {
     output?: string;
     role?: string;
     content?: string | Array<{ type?: string; text?: string }>;
+    results?: Array<{ title?: string; url?: string; content?: string; snippet?: string; text?: string }>;
 }
 
 interface DeepSeekResponse {
     output?: ResponseOutputItem[];
     error?: { message?: string };
 }
-
-// interface SearxngResponse {
-//     results?: Array<{
-//         title?: string;
-//         url?: string;
-//         content?: string;
-//         snippet?: string;
-//     }>;
-// }
 
 const SYSTEM_PROMPT = [
     'Your name is DeepSeek Coding Agent. You are powered by the DeepSeek API, not Anthropic Claude, OpenAI, or any other model provider. Never identify yourself as Claude, claim to be Claude Code, or claim a different model identity. Explain clearly and provide practical code examples.',
@@ -41,17 +33,6 @@ const SYSTEM_PROMPT = [
 
 const TOOLS = [
     { type: 'web_search' },
-    // {
-//         type: 'function',
-//         name: 'search_searxng',
-//         description: 'Search the configured SearXNG instance for web pages and return a few relevant results.',
-//         parameters: {
-//             type: 'object',
-//             properties: { query: { type: 'string', description: 'A concise web search query.' } },
-//             required: ['query'],
-//             additionalProperties: false,
-//         },
-//     },
     {
         type: 'function',
         name: 'retrieve_relevant_context',
@@ -167,18 +148,6 @@ export function buildRequestBody(prompt: string, modelId: string = 'deepseek-v4-
     });
 }
 
-// export function buildSearxngSearchUrl(baseUrl: string, query: string): URL {
-//     const base = new URL(baseUrl);
-//     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
-//         throw new Error('SearXNG URL must be an HTTP(S) base URL without credentials, query, or fragment.');
-//     }
-//     base.pathname = `${base.pathname.replace(/\/+$/, '')}/search`;
-//     base.searchParams.set('q', query);
-//     base.searchParams.set('format', 'json');
-//     base.searchParams.set('safesearch', '1');
-//     return base;
-// }
-
 function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
         const headers: http.OutgoingHttpHeaders = { Accept: 'application/json' };
@@ -225,20 +194,6 @@ function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
         request.end(body);
     });
 }
-
-// async function searchSearxng(baseUrl: string, query: string): Promise<string> {
-//     const cleanedQuery = query.trim();
-//     if (!cleanedQuery || cleanedQuery.length > 256) {
-//         throw new Error('SearXNG query must contain 1 to 256 characters.');
-//     }
-//     const data = await requestJson<SearxngResponse>(buildSearxngSearchUrl(baseUrl, cleanedQuery));
-//     const results = (data.results ?? []).slice(0, 5).map((result) => ({
-//         title: result.title ?? 'Untitled result',
-//         url: result.url ?? '',
-//         snippet: (result.content ?? result.snippet ?? '').slice(0, 1200),
-//     }));
-//     return JSON.stringify({ results });
-// }
 
 function resolveWorkspacePath(workspacePath: string, relativePath = ''): string {
     const root = path.resolve(workspacePath);
@@ -480,6 +435,8 @@ export class CodingAgent {
             const output: ResponseOutputItem[] = response.output ?? [];
             const calls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'function_call');
             const webCalls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'web_search_call');
+
+            // Only finalize when there are no pending function calls AND no web search calls.
             if (calls.length === 0 && webCalls.length === 0) {
                 const text = getResponseText(response);
                 if (!text) {
@@ -492,6 +449,7 @@ export class CodingAgent {
             }
 
             const prev: ResponseOutputItem[] = typeof input === 'string' ? [{ role: 'user', content: input }] : input;
+
             const toolOutputs: ResponseOutputItem[] = await Promise.all(calls.map(async (call: ResponseOutputItem): Promise<ResponseOutputItem> => {
                 let result: string;
                 try {
@@ -528,7 +486,24 @@ export class CodingAgent {
                 }
                 return { type: 'function_call_output', call_id: call.call_id ?? '', output: result };
             }));
-            input = [...prev, ...output, ...toolOutputs];
+
+            // Convert web_search_call items (which carry their results) into
+            // output items that the next round can consume, so the model can
+            // continue reasoning from the search results instead of stopping.
+            const webSearchOutputs: ResponseOutputItem[] = webCalls.map((call: ResponseOutputItem): ResponseOutputItem => {
+                const resultsText = (call.results ?? [])
+                    .slice(0, 5)
+                    .map((r) => `${r.title ?? ''}\n${r.url ?? ''}\n${(r.content ?? r.snippet ?? r.text ?? '').slice(0, 800)}`)
+                    .filter(Boolean)
+                    .join('\n\n');
+                return {
+                    type: 'web_search_call_output',
+                    call_id: call.call_id ?? '',
+                    output: resultsText || JSON.stringify({ results: call.results ?? [], note: 'Web search returned no results.' }),
+                };
+            });
+
+            input = [...prev, ...output, ...toolOutputs, ...webSearchOutputs];
         }
 
         throw new Error('DeepSeek did not complete the response.');
