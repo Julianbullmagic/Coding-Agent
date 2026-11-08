@@ -189,7 +189,7 @@ function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
         const request = url.protocol === 'https:'
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
-        request.setTimeout(60_000, () => request.destroy(new Error('Web request timed out.')));
+        request.setTimeout(180_000, () => request.destroy(new Error('Web request timed out.')));
         request.on('error', reject);
         request.end(body);
     });
@@ -364,8 +364,9 @@ async function fetchPage(apiKey: string, rawUrl: string): Promise<string> {
     return JSON.stringify({ title: page.title ?? '', content: (page.content ?? '').slice(0, 12000) });
 }
 
-function getResponseText(response: DeepSeekResponse): string {
-    return (response.output ?? [])
+function getResponseText(response: DeepSeekResponse | null | undefined): string {
+    const output = response?.output ?? [];
+    return (output)
         .filter((item) => item.type === 'message')
         .flatMap((item) => Array.isArray(item.content) ? item.content : [])
         .filter((part) => part.type === 'output_text' && part.text)
@@ -427,11 +428,14 @@ export class CodingAgent {
                 tools: TOOLS,
                 tool_choice: 'auto',
             });
-            const response: DeepSeekResponse = await requestJson<DeepSeekResponse>(
+            const response: DeepSeekResponse | null = await requestJson<DeepSeekResponse | null>(
                 new URL('https://api.deepseek.com/responses'),
                 requestBody,
                 apiKey,
             );
+            if (!response) {
+                throw new Error('DeepSeek returned an empty response body.');
+            }
             const output: ResponseOutputItem[] = response.output ?? [];
             const calls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'function_call');
             const webCalls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'web_search_call');

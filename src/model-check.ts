@@ -46,7 +46,7 @@ function requestText(url: URL, apiKey?: string): Promise<string> {
         const request = url.protocol === 'https:'
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
-        request.setTimeout(60_000, () => request.destroy(new Error('Model check request timed out.')));
+        request.setTimeout(180_000, () => request.destroy(new Error('Model check request timed out.')));
         request.on('error', reject);
         request.end();
     });
