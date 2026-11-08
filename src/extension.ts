@@ -664,6 +664,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         await context.secrets.store(GOOGLE_CLIENT_ID_SECRET, trimmedId);
         await context.secrets.store(GOOGLE_CLIENT_SECRET_SECRET, trimmedSecret);
+        await context.secrets.store(GMAIL_CLIENT_ID_SECRET, trimmedId);
+        await context.secrets.store(GMAIL_CLIENT_SECRET_SECRET, trimmedSecret);
         void vscode.window.showInformationMessage('Google Calendar credentials saved. The agent will prompt for authorization on first use.');
     });
 
