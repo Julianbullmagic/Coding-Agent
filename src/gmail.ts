@@ -292,7 +292,6 @@ export async function runConfirmedGmailMutation(args: GmailToolArgs, tokens: OAu
         const cc = args.cc;
         const bcc = args.bcc;
         const headers = [
-            `From: me`,
             `To: ${to}`,
             ...(cc ? [`Cc: ${cc}`] : []),
             ...(bcc ? [`Bcc: ${bcc}`] : []),
