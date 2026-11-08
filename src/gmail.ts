@@ -141,12 +141,19 @@ function httpsRequestJson(
     return new Promise((resolve, reject) => {
         const parsed = new URL(url);
         const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+        const hasExplicitContentType = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
+        const finalHeaders: Record<string, string> = { ...headers };
+        if (payload !== undefined) {
+            if (!hasExplicitContentType) {
+                finalHeaders['Content-Type'] = 'application/json';
+            }
+            if (finalHeaders['Content-Length'] === undefined) {
+                finalHeaders['Content-Length'] = String(Buffer.byteLength(payload));
+            }
+        }
         const options: https.RequestOptions = {
             method,
-            headers: {
-                ...headers,
-                ...(payload !== undefined ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-            },
+            headers: finalHeaders,
         };
         const req = https.request(parsed, options, (res) => {
             const chunks: Buffer[] = [];
