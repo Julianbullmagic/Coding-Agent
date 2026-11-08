@@ -150,7 +150,9 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
             clientSecret: await context.secrets.get(GMAIL_CLIENT_SECRET_SECRET) ?? '',
         };
         if (!credentials.clientId || !credentials.clientSecret) {
-            return JSON.stringify({ error: 'Gmail is not configured. Run "Coding Agent: Configure Google Calendar" to provide Google OAuth credentials.' });
+            const message = 'Gmail is not configured. Run "Coding Agent: Configure Google Calendar" (Ctrl+Shift+P), paste your Desktop-app Client ID and Secret, then reload.';
+            void vscode.window.showErrorMessage(message);
+            return JSON.stringify({ error: message });
         }
 
         const readTokens = async () => {
@@ -166,6 +168,7 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
         // action triggers the browser flow instead of silently failing.
         const authorize = async (): Promise<{ access_token: string; refresh_token?: string; expires_at?: number }> => {
             const authUrl = buildGmailAuthorizationUrl(credentials.clientId);
+            void vscode.window.showInformationMessage('Opening browser to authorize Gmail. After allowing access, paste the code from the redirected URL.');
             await vscode.env.openExternal(vscode.Uri.parse(authUrl));
             const code = await vscode.window.showInputBox({
                 prompt: 'Paste the authorization code from the browser after allowing access.',
@@ -196,7 +199,9 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
                 return JSON.stringify(retried);
             } catch (error) {
                 const detail = error instanceof Error ? error.message : 'Unknown error';
-                return JSON.stringify({ ok: false, message: `Gmail authorization failed: ${detail}` });
+                const message = `Gmail authorization failed: ${detail}`;
+                void vscode.window.showErrorMessage(message);
+                return JSON.stringify({ ok: false, message });
             }
         }
 
@@ -223,10 +228,15 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
         }
 
         if (!tokens.access_token) {
-            return JSON.stringify({ error: 'Gmail is not authorized yet.' });
+            const message = 'Gmail is not authorized yet.';
+            void vscode.window.showErrorMessage(message);
+            return JSON.stringify({ error: message });
         }
 
         const result = await runConfirmedGmailMutation(args, tokens);
+        if (!result.ok) {
+            void vscode.window.showErrorMessage(result.message);
+        }
         return JSON.stringify(result);
     };
 }
@@ -683,7 +693,7 @@ export function activate(context: vscode.ExtensionContext) {
         await context.secrets.store(GOOGLE_CLIENT_SECRET_SECRET, trimmedSecret);
         await context.secrets.store(GMAIL_CLIENT_ID_SECRET, trimmedId);
         await context.secrets.store(GMAIL_CLIENT_SECRET_SECRET, trimmedSecret);
-        void vscode.window.showInformationMessage('Google Calendar credentials saved. The agent will prompt for authorization on first use.');
+        void vscode.window.showInformationMessage('Google OAuth credentials saved for Calendar and Gmail. Reload the window, then the browser will open to authorize on first email/calendar use.');
     });
 
     const askDeepSeek = vscode.commands.registerCommand('codingAgent.askDeepSeek', async () => {
