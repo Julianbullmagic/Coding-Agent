@@ -5,6 +5,7 @@ import * as https from 'https';
 import * as path from 'path';
 import { RagConversation, retrieveRelevantContext as retrieveRag } from './rag';
 import type { CalendarToolArgs } from './google-calendar';
+import type { GmailToolArgs } from './gmail';
 
 interface ResponseOutputItem {
     type?: string;
@@ -195,6 +196,77 @@ const TOOLS = [
                 eventId: { type: 'string', description: 'The event ID to delete.' },
             },
             required: ['eventId'],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'list_emails',
+        description: 'List recent Gmail messages. Read-only; runs without confirmation.',
+        parameters: {
+            type: 'object',
+            properties: {
+                maxResults: { type: 'number', description: 'Max messages (default 10, max 50).' },
+                query: { type: 'string', description: 'Optional Gmail search query.' },
+            },
+            required: [],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'search_emails',
+        description: 'Search Gmail messages using a Gmail query. Read-only; runs without confirmation.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Gmail search query.' },
+            },
+            required: ['query'],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'read_email',
+        description: 'Read a single Gmail message by ID. Read-only; runs without confirmation.',
+        parameters: {
+            type: 'object',
+            properties: {
+                messageId: { type: 'string', description: 'The Gmail message ID.' },
+            },
+            required: ['messageId'],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'send_email',
+        description: 'Send a new Gmail message. Requires user confirmation before executing.',
+        parameters: {
+            type: 'object',
+            properties: {
+                to: { type: 'string', description: 'Recipient email address.' },
+                subject: { type: 'string', description: 'Email subject.' },
+                body: { type: 'string', description: 'Email body text.' },
+                cc: { type: 'string', description: 'Optional Cc recipient.' },
+                bcc: { type: 'string', description: 'Optional Bcc recipient.' },
+            },
+            required: ['to', 'subject', 'body'],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'reply_email',
+        description: 'Reply to an existing Gmail message by ID. Requires user confirmation before executing.',
+        parameters: {
+            type: 'object',
+            properties: {
+                messageId: { type: 'string', description: 'The Gmail message ID to reply to.' },
+                body: { type: 'string', description: 'Reply body text.' },
+            },
+            required: ['messageId', 'body'],
             additionalProperties: false,
         },
     },
@@ -444,6 +516,7 @@ export class CodingAgent {
         private conversationStore?: () => RagConversation[],
         private activeConversationId?: () => string | undefined,
         private calendarHandler?: (args: Record<string, unknown>) => Promise<string>,
+        private gmailHandler?: (args: Record<string, unknown>) => Promise<string>,
     ) {}
 
     setModel(modelId: string): void {
@@ -554,6 +627,15 @@ export class CodingAgent {
                             });
                         } else {
                             result = JSON.stringify({ error: 'Google Calendar is not connected in this session.' });
+                        }
+                    } else if (call.name === 'list_emails' || call.name === 'search_emails' || call.name === 'read_email' || call.name === 'send_email' || call.name === 'reply_email') {
+                        if (this.gmailHandler) {
+                            result = await this.gmailHandler({
+                                action: call.name === 'list_emails' ? 'list' : call.name === 'search_emails' ? 'search' : call.name === 'read_email' ? 'read' : call.name === 'send_email' ? 'send' : 'reply',
+                                ...args,
+                            });
+                        } else {
+                            result = JSON.stringify({ error: 'Gmail is not connected in this session.' });
                         }
                     } else {
                         result = JSON.stringify({ error: 'Invalid or unsupported web-tool arguments.' });

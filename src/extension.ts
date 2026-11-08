@@ -22,6 +22,19 @@ import {
     CalendarToolArgs,
     isReadOnly,
 } from './google-calendar';
+import {
+    GMAIL_CLIENT_ID_SECRET,
+    GMAIL_CLIENT_SECRET_SECRET,
+    GMAIL_TOKENS_SECRET,
+    GmailToolArgs,
+    buildGmailAuthorizationUrl,
+    buildGmailConfirmationMessage,
+    exchangeGmailCodeForTokens,
+    refreshGmailAccessToken,
+    runGmailTool,
+    runConfirmedGmailMutation,
+    isGmailReadOnly,
+} from './gmail';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
 
@@ -124,6 +137,85 @@ function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<
         }
 
         const result = await runConfirmedMutation(args, tokens);
+        return JSON.stringify(result);
+    };
+}
+
+function createGmailHandler(context: vscode.ExtensionContext): (args: Record<string, unknown>) => Promise<string> {
+    return async (rawArgs: Record<string, unknown>): Promise<string> => {
+        const args = rawArgs as unknown as GmailToolArgs;
+
+        if (isGmailReadOnly(args.action)) {
+            const result = await runGmailTool(
+                args,
+                async () => {
+                    const stored = context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GMAIL_TOKENS_SECRET);
+                    return stored ?? null;
+                },
+                async () => {
+                    const clientId = await context.secrets.get(GMAIL_CLIENT_ID_SECRET);
+                    const clientSecret = await context.secrets.get(GMAIL_CLIENT_SECRET_SECRET);
+                    if (!clientId || !clientSecret) return null;
+                    return { clientId, clientSecret };
+                },
+                async (tokens) => {
+                    await context.globalState.update(GMAIL_TOKENS_SECRET, tokens);
+                },
+            );
+            if (result.needsAuthorization) {
+                return JSON.stringify({ needsAuthorization: true, message: result.message });
+            }
+            return JSON.stringify(result);
+        }
+
+        const credentials = {
+            clientId: await context.secrets.get(GMAIL_CLIENT_ID_SECRET) ?? '',
+            clientSecret: await context.secrets.get(GMAIL_CLIENT_SECRET_SECRET) ?? '',
+        };
+        if (!credentials.clientId || !credentials.clientSecret) {
+            return JSON.stringify({ error: 'Gmail is not configured. Run "Coding Agent: Configure Google Calendar" to provide Google OAuth credentials.' });
+        }
+
+        const confirmMessage = buildGmailConfirmationMessage(args);
+        const choice = await vscode.window.showWarningMessage(
+            confirmMessage,
+            { modal: true },
+            'Send',
+            'Cancel',
+        );
+        if (choice !== 'Send') {
+            return JSON.stringify({ ok: false, message: 'Email action cancelled by the user.' });
+        }
+
+        let tokens = await context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GMAIL_TOKENS_SECRET)
+            ?? (await (async () => {
+                const authUrl = buildGmailAuthorizationUrl(credentials.clientId);
+                await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+                const code = await vscode.window.showInputBox({
+                    prompt: 'Paste the authorization code from the browser after allowing access.',
+                    password: true,
+                    ignoreFocusOut: true,
+                });
+                if (!code) throw new Error('Authorization cancelled.');
+                const exchanged = await exchangeGmailCodeForTokens(credentials.clientId, credentials.clientSecret, code.trim());
+                await context.globalState.update(GMAIL_TOKENS_SECRET, exchanged);
+                return exchanged;
+            })());
+
+        if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+            if (tokens.refresh_token) {
+                tokens = await refreshGmailAccessToken(credentials.clientId, credentials.clientSecret, tokens.refresh_token);
+                await context.globalState.update(GMAIL_TOKENS_SECRET, tokens);
+            } else {
+                return JSON.stringify({ error: 'Gmail token expired. Re-authorize by reconfiguring Google credentials.' });
+            }
+        }
+
+        if (!tokens.access_token) {
+            return JSON.stringify({ error: 'Gmail is not authorized yet.' });
+        }
+
+        const result = await runConfirmedGmailMutation(args, tokens);
         return JSON.stringify(result);
     };
 }
@@ -351,6 +443,7 @@ export function activate(context: vscode.ExtensionContext) {
         },
         () => context.workspaceState.get<string>('codingAgent.activeConversation'),
         createCalendarHandler(context),
+        createGmailHandler(context),
     );
 
     void (async () => {
