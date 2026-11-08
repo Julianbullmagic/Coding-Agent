@@ -1,7 +1,7 @@
 import * as https from 'https';
 import * as vscode from 'vscode';
 
-const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const REDIRECT_URI = 'http://localhost';
