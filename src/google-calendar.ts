@@ -1,4 +1,3 @@
-import * as http from 'http';
 import * as https from 'https';
 import * as vscode from 'vscode';
 
@@ -122,7 +121,7 @@ export function isReadOnly(action: string): boolean {
 }
 
 /**
- * Build the OAuth authorization URL (PKCE-free desktop flow).
+ * Build the OAuth authorization URL (non-PKCE desktop loopback flow).
  */
 export function buildAuthorizationUrl(clientId: string): string {
     const params = new URLSearchParams({
@@ -136,16 +135,48 @@ export function buildAuthorizationUrl(clientId: string): string {
     return `${AUTH_ENDPOINT}?${params.toString()}`;
 }
 
+/**
+ * Extract the OAuth `code` from user input, tolerating a full redirect URL
+ * (e.g. `http://localhost/?code=...&scope=...`) instead of just the raw code.
+ */
+export function extractAuthorizationCode(input: string): string {
+    const trimmed = input.trim();
+    if (!trimmed) return '';
+
+    // If the user pasted a full redirect URL, pull out the `code` query param.
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        try {
+            const url = new URL(trimmed);
+            const code = url.searchParams.get('code');
+            if (code) return code;
+        } catch {
+            // Not a parseable URL; fall through to treating as raw code.
+        }
+    }
+
+    // Otherwise treat the input as a raw code (strip trailing query/whitespace).
+    return trimmed.split(/[&\s]/)[0];
+}
+
 function httpsRequestJson(url: string, method: 'GET' | 'POST' | 'PATCH' | 'DELETE', body?: unknown, headers: Record<string, string> = {}): Promise<any> {
     return new Promise((resolve, reject) => {
         const parsed = new URL(url);
         const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+        // Respect an explicitly provided Content-Type (needed for form-encoded
+        // OAuth token requests) instead of always forcing application/json.
+        const hasExplicitContentType = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
+        const finalHeaders: Record<string, string> = { ...headers };
+        if (payload !== undefined) {
+            if (!hasExplicitContentType) {
+                finalHeaders['Content-Type'] = 'application/json';
+            }
+            if (finalHeaders['Content-Length'] === undefined) {
+                finalHeaders['Content-Length'] = String(Buffer.byteLength(payload));
+            }
+        }
         const options: https.RequestOptions = {
             method,
-            headers: {
-                ...headers,
-                ...(payload !== undefined ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-            },
+            headers: finalHeaders,
         };
         const req = https.request(parsed, options, (res) => {
             const chunks: Buffer[] = [];
@@ -172,14 +203,14 @@ function httpsRequestJson(url: string, method: 'GET' | 'POST' | 'PATCH' | 'DELET
  * Exchange an authorization code for tokens.
  */
 export async function exchangeCodeForTokens(clientId: string, clientSecret: string, code: string): Promise<OAuthTokens> {
-    const body: Record<string, string> = {
-        code,
+    const body = new URLSearchParams({
+        code: extractAuthorizationCode(code),
         client_id: clientId,
         client_secret: clientSecret,
         redirect_uri: REDIRECT_URI,
         grant_type: 'authorization_code',
-    };
-    const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', new URLSearchParams(body).toString(), {
+    }).toString();
+    const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', body, {
         'Content-Type': 'application/x-www-form-urlencoded',
     });
     return {

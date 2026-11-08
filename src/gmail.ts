@@ -132,6 +132,29 @@ export function buildGmailAuthorizationUrl(clientId: string): string {
     return `${AUTH_ENDPOINT}?${params.toString()}`;
 }
 
+/**
+ * Extract the OAuth `code` from user input, tolerating a full redirect URL
+ * (e.g. `http://localhost/?code=...&scope=...`) instead of just the raw code.
+ */
+export function extractGmailAuthorizationCode(input: string): string {
+    const trimmed = input.trim();
+    if (!trimmed) return '';
+
+    // If the user pasted a full redirect URL, pull out the `code` query param.
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        try {
+            const url = new URL(trimmed);
+            const code = url.searchParams.get('code');
+            if (code) return code;
+        } catch {
+            // Not a parseable URL; fall through to treating as raw code.
+        }
+    }
+
+    // Otherwise treat the input as a raw code (strip trailing query/whitespace).
+    return trimmed.split(/[&\s]/)[0];
+}
+
 function httpsRequestJson(
     url: string,
     method: 'GET' | 'POST',
@@ -178,7 +201,7 @@ function httpsRequestJson(
 
 export async function exchangeGmailCodeForTokens(clientId: string, clientSecret: string, code: string): Promise<OAuthTokens> {
     const body = new URLSearchParams({
-        code,
+        code: extractGmailAuthorizationCode(code),
         client_id: clientId,
         client_secret: clientSecret,
         redirect_uri: REDIRECT_URI,
