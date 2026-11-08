@@ -206,13 +206,15 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
         }
 
         const confirmMessage = buildGmailConfirmationMessage(args);
+        const isReply = args.action === 'reply';
+        const confirmLabel = isReply ? 'Reply' : 'Send';
         const choice = await vscode.window.showWarningMessage(
             confirmMessage,
             { modal: true },
-            'Send',
+            confirmLabel,
             'Cancel',
         );
-        if (choice !== 'Send') {
+        if (choice !== confirmLabel) {
             return JSON.stringify({ ok: false, message: 'Email action cancelled by the user.' });
         }
 

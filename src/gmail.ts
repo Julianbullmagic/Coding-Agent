@@ -254,6 +254,43 @@ async function listMessages(accessToken: string, args: GmailToolArgs): Promise<G
     }));
 }
 
+/**
+ * Fetch and decode a single message's body text (read action).
+ */
+async function readMessage(accessToken: string, messageId: string): Promise<string> {
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=full`;
+    const result = await httpsRequestJson(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
+    const parts = result.payload?.parts ?? [];
+    const headers = result.payload?.headers ?? [];
+    const parseHeader = (name: string) => {
+        const header = headers.find((h: any) => (h.name ?? '').toLowerCase() === name.toLowerCase());
+        return header?.value ?? '';
+    };
+    const from = parseHeader('From');
+    const subject = parseHeader('Subject');
+
+    // Recurse through MIME parts to find text/plain or text/html bodies.
+    const collectText = (part: any): string => {
+        if (!part) return '';
+        if (part.mimeType === 'text/plain' && part.body?.data) {
+            return Buffer.from(part.body.data, 'base64').toString('utf8');
+        }
+        if (part.parts && Array.isArray(part.parts)) {
+            return part.parts.map(collectText).join('\n');
+        }
+        return '';
+    };
+    const text = (parts as any[]).map(collectText).join('\n').trim() || collectText(result.payload);
+
+    return JSON.stringify({
+        id: result.id ?? messageId,
+        from,
+        subject,
+        snippet: result.snippet ?? '',
+        body: text.slice(0, 50000),
+    });
+}
+
 export async function runGmailTool(
     args: GmailToolArgs,
     getTokens: () => Promise<OAuthTokens | null>,
@@ -307,6 +344,19 @@ export async function runGmailTool(
                 messages,
             };
         }
+        if (args.action === 'search') {
+            // search == list with a query.
+            const messages = await listMessages(tokens.access_token, { ...args, action: 'list' });
+            return {
+                ok: true,
+                message: messages && messages.length === 0 ? 'No messages matched.' : `Found ${messages?.length ?? 0} matching message(s).`,
+                messages,
+            };
+        }
+        if (args.action === 'read' && typeof args.messageId === 'string') {
+            const body = await readMessage(tokens.access_token, args.messageId);
+            return { ok: true, message: 'Message retrieved.', body };
+        }
         return { ok: false, message: 'Unsupported read action.' };
     } catch (error) {
         const detail = error instanceof Error ? error.message : 'Unknown error';
@@ -316,6 +366,48 @@ export async function runGmailTool(
 
 export async function runConfirmedGmailMutation(args: GmailToolArgs, tokens: OAuthTokens): Promise<GmailResult> {
     try {
+        if (args.action === 'reply' && args.messageId) {
+            // Reply to an existing message by its messageId. We look up the
+            // original thread so the reply lands in the right conversation.
+            const originalUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(args.messageId)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To`;
+            const original = await httpsRequestJson(originalUrl, 'GET', undefined, { Authorization: `Bearer ${tokens.access_token}` });
+
+            const headers = (original.payload?.headers ?? []) as Array<{ name?: string; value?: string }>;
+            const findHeader = (name: string) =>
+                headers.find((h) => (h.name ?? '').toLowerCase() === name.toLowerCase())?.value ?? '';
+
+            const originalSubject = findHeader('Subject');
+            const originalFrom = findHeader('From');
+
+            // Prepend "Re:" if not already present.
+            const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
+
+            const to = originalFrom; // Reply to the sender.
+            const threadId = original.threadId ?? args.threadId ?? '';
+            const body = args.body ?? '';
+            const cc = args.cc;
+            const bcc = args.bcc;
+
+            const headerLines = [
+                `To: ${to}`,
+                ...(cc ? [`Cc: ${cc}`] : []),
+                ...(bcc ? [`Bcc: ${bcc}`] : []),
+                `Subject: ${subject}`,
+                ...(threadId ? [`In-Reply-To: ${args.messageId}`, `References: ${threadId}`] : []),
+                'Content-Type: text/plain; charset="UTF-8"',
+                '',
+                body,
+            ].join('\r\n');
+
+            const raw = base64UrlEncode(headerLines);
+            const sendUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
+            const sendBody: { raw: string; threadId?: string } = { raw };
+            if (threadId) sendBody.threadId = threadId;
+            await httpsRequestJson(sendUrl, 'POST', sendBody, { Authorization: `Bearer ${tokens.access_token}` });
+            return { ok: true, message: 'Reply sent.' };
+        }
+
+        // Default: send a new email.
         const to = args.to ?? '';
         const subject = args.subject ?? '';
         const body = args.body ?? '';
