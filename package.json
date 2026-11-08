@@ -1,14 +1,20 @@
 {
   "name": "coding-agent-extension",
   "displayName": "Coding Agent Extension",
-  "description": "A DeepSeek coding assistant with web search and SearXNG browsing.",
-  "version": "0.2.0",
+  "description": "A DeepSeek coding assistant with web search and GitHub backup.",
+  "version": "0.2.1",
   "publisher": "your-name",
   "engines": {
     "vscode": "^1.90.0"
   },
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:codingAgent.askDeepSeek",
+    "onCommand:codingAgent.setApiKey",
+    "onCommand:codingAgent.newConversation",
+    "onCommand:codingAgent.loginGitHub",
+    "onCommand:codingAgent.backupNow",
+    "onCommand:codingAgent.configureGoogleCalendar"
   ],
   "main": "./out/src/extension.js",
   "scripts": {
@@ -39,21 +45,6 @@
     "configuration": {
       "title": "Coding Agent",
       "properties": {
-        "codingAgent.searxngBaseUrl": {
-          "type": "string",
-          "default": "http://localhost:8080",
-          "description": "Base URL of your SearXNG instance. Enable the JSON search format on that instance."
-        },
-        "codingAgent.autoStartSearxng": {
-          "type": "boolean",
-          "default": true,
-          "description": "Start the bundled local SearXNG Docker service automatically when VS Code starts."
-        },
-        "codingAgent.autoInstallDocker": {
-          "type": "boolean",
-          "default": true,
-          "description": "Install Docker Desktop automatically with Windows Package Manager when Docker is missing."
-        },
         "codingAgent.maxToolRounds": {
           "type": "number",
           "default": 1000,
