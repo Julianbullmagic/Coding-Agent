@@ -653,6 +653,12 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showInformationMessage('DeepSeek API key saved securely.');
     });
 
+    const forgetGoogleTokens = vscode.commands.registerCommand('codingAgent.forgetGoogleTokens', async () => {
+        await context.globalState.update(GOOGLE_TOKENS_SECRET, undefined);
+        await context.globalState.update(GMAIL_TOKENS_SECRET, undefined);
+        void vscode.window.showInformationMessage('Calendar and Gmail authorization cleared. The agent will re-open the browser on next use.');
+    });
+
     const configureGoogleCalendar = vscode.commands.registerCommand('codingAgent.configureGoogleCalendar', async () => {
         const clientId = await vscode.window.showInputBox({
             prompt: 'Enter your Google OAuth Client ID (Desktop app).',
@@ -700,6 +706,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         setApiKey,
         configureGoogleCalendar,
+        forgetGoogleTokens,
         askDeepSeek,
         newConversation,
         loginGitHub,
