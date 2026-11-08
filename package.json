@@ -110,6 +110,10 @@
       {
         "command": "codingAgent.backupNow",
         "title": "Coding Agent: Back Up to GitHub Now"
+      },
+      {
+        "command": "codingAgent.configureGoogleCalendar",
+        "title": "Coding Agent: Configure Google Calendar"
       }
     ]
   },

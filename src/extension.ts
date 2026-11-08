@@ -9,6 +9,19 @@ import { ensureRepoOnOpen } from './repo-bootstrap';
 import { detectWorkspaceFolder } from './path-detection';
 import { RagConversation, retrieveRelevantContext, shouldRetrieve, formatRetrievedContext } from './rag';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
+import {
+    GOOGLE_CLIENT_ID_SECRET,
+    GOOGLE_CLIENT_SECRET_SECRET,
+    GOOGLE_TOKENS_SECRET,
+    buildAuthorizationUrl,
+    buildConfirmationMessage,
+    exchangeCodeForTokens,
+    refreshAccessToken,
+    runCalendarTool,
+    runConfirmedMutation,
+    CalendarToolArgs,
+    isReadOnly,
+} from './google-calendar';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
 
@@ -29,6 +42,90 @@ function summarizeConversation(messages: ChatMessage[]): string {
 
     const summary = firstSentence || firstUserMessage;
     return summary.length > 42 ? `${summary.slice(0, 39).trim()}...` : summary;
+}
+
+function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<string, unknown>) => Promise<string> {
+    return async (rawArgs: Record<string, unknown>): Promise<string> => {
+        const args = rawArgs as unknown as CalendarToolArgs;
+
+        // Read-only list runs directly.
+        if (isReadOnly(args.action)) {
+            const result = await runCalendarTool(
+                args,
+                async () => {
+                    const stored = context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GOOGLE_TOKENS_SECRET);
+                    return stored ?? null;
+                },
+                async () => {
+                    const clientId = await context.secrets.get(GOOGLE_CLIENT_ID_SECRET);
+                    const clientSecret = await context.secrets.get(GOOGLE_CLIENT_SECRET_SECRET);
+                    if (!clientId || !clientSecret) return null;
+                    return { clientId, clientSecret };
+                },
+                async (tokens) => {
+                    await context.globalState.update(GOOGLE_TOKENS_SECRET, tokens);
+                },
+                async () => undefined,
+            );
+            if (result.needsAuthorization) {
+                return JSON.stringify({ needsAuthorization: true, message: result.message });
+            }
+            return JSON.stringify(result);
+        }
+
+        // Mutations require confirmation first.
+        const credentials = {
+            clientId: await context.secrets.get(GOOGLE_CLIENT_ID_SECRET) ?? '',
+            clientSecret: await context.secrets.get(GOOGLE_CLIENT_SECRET_SECRET) ?? '',
+        };
+        if (!credentials.clientId || !credentials.clientSecret) {
+            return JSON.stringify({ error: 'Google Calendar is not configured. Run "Coding Agent: Configure Google Calendar" first.' });
+        }
+
+        // Show detailed confirmation.
+        const confirmMessage = buildConfirmationMessage(args);
+        const choice = await vscode.window.showWarningMessage(
+            confirmMessage,
+            { modal: true },
+            'Confirm',
+            'Cancel',
+        );
+        if (choice !== 'Confirm') {
+            return JSON.stringify({ ok: false, message: 'Calendar change cancelled by the user.' });
+        }
+
+        // Resolve a valid token.
+        let tokens = await context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GOOGLE_TOKENS_SECRET)
+            ?? (await (async () => {
+                const authUrl = buildAuthorizationUrl(credentials.clientId);
+                await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+                const code = await vscode.window.showInputBox({
+                    prompt: 'Paste the authorization code from the browser after allowing access.',
+                    password: true,
+                    ignoreFocusOut: true,
+                });
+                if (!code) throw new Error('Authorization cancelled.');
+                const exchanged = await exchangeCodeForTokens(credentials.clientId, credentials.clientSecret, code.trim());
+                await context.globalState.update(GOOGLE_TOKENS_SECRET, exchanged);
+                return exchanged;
+            })());
+
+        if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+            if (tokens.refresh_token) {
+                tokens = await refreshAccessToken(credentials.clientId, credentials.clientSecret, tokens.refresh_token);
+                await context.globalState.update(GOOGLE_TOKENS_SECRET, tokens);
+            } else {
+                return JSON.stringify({ error: 'Calendar token expired. Re-authorize by reconfiguring Google Calendar.' });
+            }
+        }
+
+        if (!tokens.access_token) {
+            return JSON.stringify({ error: 'Google Calendar is not authorized yet.' });
+        }
+
+        const result = await runConfirmedMutation(args, tokens);
+        return JSON.stringify(result);
+    };
 }
 
 class CodingAgentChatProvider implements vscode.WebviewViewProvider {
@@ -253,6 +350,7 @@ export function activate(context: vscode.ExtensionContext) {
             }));
         },
         () => context.workspaceState.get<string>('codingAgent.activeConversation'),
+        createCalendarHandler(context),
     );
 
     void (async () => {
@@ -451,6 +549,31 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showInformationMessage('DeepSeek API key saved securely.');
     });
 
+    const configureGoogleCalendar = vscode.commands.registerCommand('codingAgent.configureGoogleCalendar', async () => {
+        const clientId = await vscode.window.showInputBox({
+            prompt: 'Enter your Google OAuth Client ID (Desktop app).',
+            ignoreFocusOut: true,
+        });
+        if (clientId === undefined) return;
+        const clientSecret = await vscode.window.showInputBox({
+            prompt: 'Enter your Google OAuth Client Secret.',
+            password: true,
+            ignoreFocusOut: true,
+        });
+        if (clientSecret === undefined) return;
+
+        const trimmedId = clientId.trim();
+        const trimmedSecret = clientSecret.trim();
+        if (!trimmedId || !trimmedSecret) {
+            void vscode.window.showWarningMessage('Both Client ID and Client Secret are required.');
+            return;
+        }
+
+        await context.secrets.store(GOOGLE_CLIENT_ID_SECRET, trimmedId);
+        await context.secrets.store(GOOGLE_CLIENT_SECRET_SECRET, trimmedSecret);
+        void vscode.window.showInformationMessage('Google Calendar credentials saved. The agent will prompt for authorization on first use.');
+    });
+
     const askDeepSeek = vscode.commands.registerCommand('codingAgent.askDeepSeek', async () => {
         await vscode.commands.executeCommand('codingAgent.chat.focus');
     });
@@ -470,6 +593,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         setApiKey,
+        configureGoogleCalendar,
         askDeepSeek,
         newConversation,
         loginGitHub,
