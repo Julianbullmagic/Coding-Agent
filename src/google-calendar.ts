@@ -48,6 +48,69 @@ export interface CalendarResult {
 }
 
 /**
+ * Coerce a possibly-string `expires_in` (seconds) into a numeric value, or
+ * return undefined when it is absent/non-numeric/zero.
+ */
+export function coerceExpiresIn(expiresIn: unknown): number | undefined {
+    if (expiresIn === undefined || expiresIn === null) return undefined;
+    const numeric = typeof expiresIn === 'number' ? expiresIn : Number(expiresIn);
+    if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+    return numeric;
+}
+
+/**
+ * Nudge before expiry: tokens are treated as expired this many ms early so a
+ * refresh happens before the access token actually becomes invalid.
+ */
+const EXPIRY_BUFFER_MS = 60000;
+
+/**
+ * Normalize a raw token payload (freshly exchanged, refreshed, or read back
+ * from storage) into a well-formed {@link OAuthTokens} object, computing
+ * `expires_at` from `expires_in` when only the latter is present.
+ *
+ * Returns null if the payload has no usable access token, so callers can treat
+ * it as "not stored" instead of persisting a broken object.
+ */
+export function normalizeTokens(raw: unknown): OAuthTokens | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const candidate = raw as Record<string, unknown>;
+
+    const accessToken = typeof candidate.access_token === 'string' ? candidate.access_token.trim() : '';
+    if (!accessToken) return null;
+
+    const refreshToken = typeof candidate.refresh_token === 'string' && candidate.refresh_token.trim()
+        ? candidate.refresh_token.trim()
+        : undefined;
+
+    let expiresAt: number | undefined;
+    if (typeof candidate.expires_at === 'number' && Number.isFinite(candidate.expires_at)) {
+        expiresAt = candidate.expires_at;
+    }
+    if (expiresAt === undefined) {
+        const expiresIn = coerceExpiresIn(candidate.expires_in);
+        if (expiresIn !== undefined) {
+            expiresAt = Date.now() + expiresIn * 1000;
+        }
+    }
+
+    const tokens: OAuthTokens = { access_token: accessToken };
+    if (refreshToken) tokens.refresh_token = refreshToken;
+    if (expiresAt !== undefined) tokens.expires_at = expiresAt;
+    return tokens;
+}
+
+/**
+ * True when the token is known to be expired (or within the refresh buffer),
+ * meaning it should be refreshed before use.
+ */
+export function isTokenExpired(tokens: OAuthTokens): boolean {
+    // Without an expiry timestamp we optimistically assume it is still valid;
+    // only explicit expiry forces a refresh.
+    return typeof tokens.expires_at === 'number' && tokens.expires_at <= Date.now() + EXPIRY_BUFFER_MS;
+}
+
+/**
  * Parse and validate tool arguments for calendar operations.
  * Returns an error string if invalid, otherwise null.
  */
@@ -136,25 +199,44 @@ export function buildAuthorizationUrl(clientId: string): string {
 }
 
 /**
- * Extract the OAuth `code` from user input, tolerating a full redirect URL
- * (e.g. `http://localhost/?code=...&scope=...`) instead of just the raw code.
+ * Extract the OAuth authorization `code` from user input, tolerating:
+ *  - a raw code,
+ *  - a full redirect URL (`http://localhost/?code=...&scope=...`),
+ *  - a code that was URL-encoded or wrapped in whitespace.
+ *
+ * Authorization codes are URL-safe and must never contain `&` or whitespace,
+ * so we only split on those when the input is NOT a bare, plausible code.
  */
 export function extractAuthorizationCode(input: string): string {
     const trimmed = input.trim();
     if (!trimmed) return '';
 
-    // If the user pasted a full redirect URL, pull out the `code` query param.
+    // Full redirect URL: pull the `code` query param.
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
         try {
             const url = new URL(trimmed);
             const code = url.searchParams.get('code');
             if (code) return code;
         } catch {
-            // Not a parseable URL; fall through to treating as raw code.
+            // Not a parseable URL; fall through.
         }
     }
 
-    // Otherwise treat the input as a raw code (strip trailing query/whitespace).
+    // A Google OAuth code is URL-safe base64-like: only A-Z a-z 0-9 - _ . ~
+    // are valid. If the whole input matches that, return it verbatim so we
+    // never truncate a legitimate code.
+    if (/^[A-Za-z0-9\-._~]+$/.test(trimmed)) {
+        // Attempt to decode in case it was percent-encoded before pasting.
+        try {
+            const decoded = decodeURIComponent(trimmed);
+            if (/^[A-Za-z0-9\-._~]+$/.test(decoded)) return decoded;
+        } catch {
+            // Not percent-encoded; use as-is.
+        }
+        return trimmed;
+    }
+
+    // Fallback: strip any trailing query-string or whitespace (defensive).
     return trimmed.split(/[&\s]/)[0];
 }
 
@@ -200,7 +282,8 @@ function httpsRequestJson(url: string, method: 'GET' | 'POST' | 'PATCH' | 'DELET
 }
 
 /**
- * Exchange an authorization code for tokens.
+ * Exchange an authorization code for tokens. Returns a normalized token object
+ * (or throws if Google did not return a usable access token).
  */
 export async function exchangeCodeForTokens(clientId: string, clientSecret: string, code: string): Promise<OAuthTokens> {
     const body = new URLSearchParams({
@@ -213,15 +296,17 @@ export async function exchangeCodeForTokens(clientId: string, clientSecret: stri
     const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', body, {
         'Content-Type': 'application/x-www-form-urlencoded',
     });
-    return {
-        access_token: result.access_token,
-        refresh_token: result.refresh_token,
-        expires_at: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined,
-    };
+    const tokens = normalizeTokens(result);
+    if (!tokens) {
+        throw new Error('Google did not return a valid access token. Check your OAuth Client ID and Secret.');
+    }
+    return tokens;
 }
 
 /**
- * Refresh an access token using a refresh token.
+ * Refresh an access token using a refresh token. Returns a normalized token
+ * object, preserving the existing refresh token when Google does not echo a
+ * new one.
  */
 export async function refreshAccessToken(clientId: string, clientSecret: string, refreshToken: string): Promise<OAuthTokens> {
     const body = new URLSearchParams({
@@ -233,11 +318,15 @@ export async function refreshAccessToken(clientId: string, clientSecret: string,
     const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', body, {
         'Content-Type': 'application/x-www-form-urlencoded',
     });
-    return {
-        access_token: result.access_token,
-        refresh_token: result.refresh_token || refreshToken,
-        expires_at: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined,
-    };
+    // Google does not always return a refresh_token on refresh; keep the old one.
+    if (!result.refresh_token) {
+        result.refresh_token = refreshToken;
+    }
+    const tokens = normalizeTokens(result);
+    if (!tokens) {
+        throw new Error('Google did not return a valid access token while refreshing. Re-authorize.');
+    }
+    return tokens;
 }
 
 /**
@@ -355,7 +444,7 @@ export async function runCalendarTool(
         return { ok: false, message: 'Google Calendar authorization required.', needsAuthorization: true };
     }
 
-    if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+    if (isTokenExpired(tokens)) {
         if (!tokens.refresh_token) {
             return { ok: false, message: 'Google Calendar token expired and cannot be refreshed. Re-authorize.', needsAuthorization: true };
         }

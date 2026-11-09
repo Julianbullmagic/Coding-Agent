@@ -19,6 +19,8 @@ import {
     refreshAccessToken,
     runCalendarTool,
     runConfirmedMutation,
+    normalizeTokens as normalizeCalendarTokens,
+    isTokenExpired as isCalendarTokenExpired,
     CalendarToolArgs,
     isReadOnly,
 } from './google-calendar';
@@ -33,6 +35,8 @@ import {
     refreshGmailAccessToken,
     runGmailTool,
     runConfirmedGmailMutation,
+    normalizeTokens as normalizeGmailTokens,
+    isTokenExpired as isGmailTokenExpired,
     isGmailReadOnly,
 } from './gmail';
 
@@ -66,8 +70,11 @@ function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<
             const result = await runCalendarTool(
                 args,
                 async () => {
-                    const stored = context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GOOGLE_TOKENS_SECRET);
-                    return stored ?? null;
+                    const stored = context.globalState.get<unknown>(GOOGLE_TOKENS_SECRET);
+                    if (typeof stored === 'string') {
+                        try { return normalizeCalendarTokens(JSON.parse(stored)); } catch { return null; }
+                    }
+                    return normalizeCalendarTokens(stored);
                 },
                 async () => {
                     const clientId = await context.secrets.get(GOOGLE_CLIENT_ID_SECRET);
@@ -108,8 +115,13 @@ function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<
         }
 
         // Resolve a valid token.
-        let tokens = await context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GOOGLE_TOKENS_SECRET)
-            ?? (await (async () => {
+        let tokens = (await (async () => {
+            const stored = context.globalState.get<unknown>(GOOGLE_TOKENS_SECRET);
+            if (typeof stored === 'string') {
+                try { return normalizeCalendarTokens(JSON.parse(stored)); } catch { return null; }
+            }
+            return normalizeCalendarTokens(stored);
+        })()) ?? (await (async () => {
                 const authUrl = buildAuthorizationUrl(credentials.clientId);
                 await vscode.env.openExternal(vscode.Uri.parse(authUrl));
                 const code = await vscode.window.showInputBox({
@@ -123,7 +135,7 @@ function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<
                 return exchanged;
             })());
 
-        if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+        if (isCalendarTokenExpired(tokens)) {
             if (tokens.refresh_token) {
                 tokens = await refreshAccessToken(credentials.clientId, credentials.clientSecret, tokens.refresh_token);
                 await context.globalState.update(GOOGLE_TOKENS_SECRET, tokens);
@@ -156,8 +168,11 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
         }
 
         const readTokens = async () => {
-            const stored = context.globalState.get<{ access_token: string; refresh_token?: string; expires_at?: number } | undefined>(GMAIL_TOKENS_SECRET);
-            return stored ?? null;
+            const stored = context.globalState.get<unknown>(GMAIL_TOKENS_SECRET);
+            if (typeof stored === 'string') {
+                try { return normalizeGmailTokens(JSON.parse(stored)); } catch { return null; }
+            }
+            return normalizeGmailTokens(stored);
         };
         const saveTokens = async (tokens: { access_token: string; refresh_token?: string; expires_at?: number }) => {
             await context.globalState.update(GMAIL_TOKENS_SECRET, tokens);
@@ -220,7 +235,7 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
 
         let tokens = (await readTokens()) ?? (await authorize());
 
-        if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+        if (isGmailTokenExpired(tokens)) {
             if (tokens.refresh_token) {
                 tokens = await refreshGmailAccessToken(credentials.clientId, credentials.clientSecret, tokens.refresh_token);
                 await saveTokens(tokens);

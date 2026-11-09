@@ -40,6 +40,59 @@ export interface GmailResult {
 }
 
 /**
+ * Coerce a possibly-string `expires_in` (seconds) into a numeric value, or
+ * return undefined when it is absent/non-numeric/zero.
+ */
+export function coerceExpiresIn(expiresIn: unknown): number | undefined {
+    if (expiresIn === undefined || expiresIn === null) return undefined;
+    const numeric = typeof expiresIn === 'number' ? expiresIn : Number(expiresIn);
+    if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+    return numeric;
+}
+
+/** Refresh-buffer: refresh this many ms before the access token expires. */
+const EXPIRY_BUFFER_MS = 60000;
+
+/**
+ * Normalize a raw token payload into a well-formed {@link OAuthTokens} object.
+ * Returns null when there is no usable access token.
+ */
+export function normalizeTokens(raw: unknown): OAuthTokens | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const candidate = raw as Record<string, unknown>;
+
+    const accessToken = typeof candidate.access_token === 'string' ? candidate.access_token.trim() : '';
+    if (!accessToken) return null;
+
+    const refreshToken = typeof candidate.refresh_token === 'string' && candidate.refresh_token.trim()
+        ? candidate.refresh_token.trim()
+        : undefined;
+
+    let expiresAt: number | undefined;
+    if (typeof candidate.expires_at === 'number' && Number.isFinite(candidate.expires_at)) {
+        expiresAt = candidate.expires_at;
+    }
+    if (expiresAt === undefined) {
+        const expiresIn = coerceExpiresIn(candidate.expires_in);
+        if (expiresIn !== undefined) {
+            expiresAt = Date.now() + expiresIn * 1000;
+        }
+    }
+
+    const tokens: OAuthTokens = { access_token: accessToken };
+    if (refreshToken) tokens.refresh_token = refreshToken;
+    if (expiresAt !== undefined) tokens.expires_at = expiresAt;
+    return tokens;
+}
+
+/**
+ * True when the token is known to be expired (or within the refresh buffer).
+ */
+export function isTokenExpired(tokens: OAuthTokens): boolean {
+    return typeof tokens.expires_at === 'number' && tokens.expires_at <= Date.now() + EXPIRY_BUFFER_MS;
+}
+
+/**
  * Parse and validate Gmail tool arguments. Returns an error string, or null if valid.
  */
 export function validateGmailArgs(args: Record<string, unknown>): string | null {
@@ -134,24 +187,36 @@ export function buildGmailAuthorizationUrl(clientId: string): string {
 
 /**
  * Extract the OAuth `code` from user input, tolerating a full redirect URL
- * (e.g. `http://localhost/?code=...&scope=...`) instead of just the raw code.
+ * or a raw (possibly percent-encoded) code.
  */
 export function extractGmailAuthorizationCode(input: string): string {
     const trimmed = input.trim();
     if (!trimmed) return '';
 
-    // If the user pasted a full redirect URL, pull out the `code` query param.
+    // Full redirect URL: pull the `code` query param.
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
         try {
             const url = new URL(trimmed);
             const code = url.searchParams.get('code');
             if (code) return code;
         } catch {
-            // Not a parseable URL; fall through to treating as raw code.
+            // Not a parseable URL; fall through.
         }
     }
 
-    // Otherwise treat the input as a raw code (strip trailing query/whitespace).
+    // Authorization codes are URL-safe base64-like (A-Z a-z 0-9 - _ . ~).
+    // Return them verbatim so we never truncate a legitimate code.
+    if (/^[A-Za-z0-9\-._~]+$/.test(trimmed)) {
+        try {
+            const decoded = decodeURIComponent(trimmed);
+            if (/^[A-Za-z0-9\-._~]+$/.test(decoded)) return decoded;
+        } catch {
+            // Not percent-encoded; use as-is.
+        }
+        return trimmed;
+    }
+
+    // Defensive fallback: strip trailing query-string / whitespace.
     return trimmed.split(/[&\s]/)[0];
 }
 
@@ -210,11 +275,11 @@ export async function exchangeGmailCodeForTokens(clientId: string, clientSecret:
     const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', body, {
         'Content-Type': 'application/x-www-form-urlencoded',
     });
-    return {
-        access_token: result.access_token,
-        refresh_token: result.refresh_token,
-        expires_at: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined,
-    };
+    const tokens = normalizeTokens(result);
+    if (!tokens) {
+        throw new Error('Google did not return a valid access token. Check your OAuth Client ID and Secret.');
+    }
+    return tokens;
 }
 
 export async function refreshGmailAccessToken(clientId: string, clientSecret: string, refreshToken: string): Promise<OAuthTokens> {
@@ -227,11 +292,15 @@ export async function refreshGmailAccessToken(clientId: string, clientSecret: st
     const result = await httpsRequestJson(TOKEN_ENDPOINT, 'POST', body, {
         'Content-Type': 'application/x-www-form-urlencoded',
     });
-    return {
-        access_token: result.access_token,
-        refresh_token: result.refresh_token || refreshToken,
-        expires_at: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined,
-    };
+    // Google may omit refresh_token on refresh; preserve the existing one.
+    if (!result.refresh_token) {
+        result.refresh_token = refreshToken;
+    }
+    const tokens = normalizeTokens(result);
+    if (!tokens) {
+        throw new Error('Google did not return a valid access token while refreshing. Re-authorize.');
+    }
+    return tokens;
 }
 
 function base64UrlEncode(value: string): string {
@@ -323,7 +392,7 @@ export async function runGmailTool(
         return { ok: false, message: 'Gmail authorization required.', needsAuthorization: true };
     }
 
-    if (tokens.expires_at && tokens.expires_at <= Date.now() + 60000) {
+    if (isTokenExpired(tokens)) {
         if (!tokens.refresh_token) {
             return { ok: false, message: 'Gmail token expired and cannot be refreshed. Re-authorize.', needsAuthorization: true };
         }
