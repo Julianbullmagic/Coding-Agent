@@ -4,6 +4,7 @@ import {
     buildGmailConfirmationMessage,
     isGmailReadOnly,
     buildGmailAuthorizationUrl,
+    findGmailHeader,
 } from '../src/gmail';
 
 describe('Gmail argument validation', () => {
@@ -62,5 +63,21 @@ describe('Gmail OAuth URL', () => {
         const url = buildGmailAuthorizationUrl('client123');
         assert.ok(url.includes('client_id=client123'));
         assert.ok(url.includes('gmail.modify'));
+    });
+});
+
+describe('findGmailHeader', () => {
+    it('finds a header case-insensitively', () => {
+        const headers = [
+            { name: 'Subject', value: 'Hello' },
+            { name: 'FROM', value: 'a@b.com' },
+        ];
+        assert.equal(findGmailHeader(headers, 'subject'), 'Hello');
+        assert.equal(findGmailHeader(headers, 'From'), 'a@b.com');
+    });
+    it('returns empty string for missing headers or undefined input', () => {
+        assert.equal(findGmailHeader([{ name: 'Subject', value: 'x' }], 'Date'), '');
+        assert.equal(findGmailHeader(undefined, 'Subject'), '');
+        assert.equal(findGmailHeader([{ name: '', value: '' }], 'Subject'), '');
     });
 });

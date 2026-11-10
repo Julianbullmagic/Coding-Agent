@@ -57,6 +57,38 @@ export const MAX_STACK_LENGTH = 800;
 const MAX_LOG_LIST_LENGTH = 4000;
 const RESOLUTION_WINDOW_MS = 5 * 60 * 1000; // same fingerprint within 5 min updates in place
 
+/**
+ * Classify an error message into an ErrorSource so the self-heal log records
+ * it under the right category and a later success (resolveSource) can clear it.
+ *
+ * Order matters: provider-specific checks run first. GLM/z.ai errors such as
+ * "The supported API model names are deepseek-flash, deepseek-v4-pro, but you
+ * passed glm-5.3." contain the word "model", so a generic 'model' check that
+ * ran earlier would misfile them as model-check. They would then never be
+ * marked resolved by a successful GLM request (which resolves 'glm-request')
+ * and the self-heal pass would re-queue them forever.
+ */
+export function classifySource(error: unknown): ErrorSource {
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    // Provider-specific checks first (GLM is the most specific provider tag).
+    if (lower.includes('glm') || lower.includes('zhipu') || lower.includes('bigmodel')) return 'glm-request';
+    // Precise model-check matches: the strings actually thrown by
+    // src/model-check.ts (request failure, unreadable model list, timeout),
+    // rather than any message that merely mentions "model". These must run
+    // before the generic 'deepseek' check below, because model-check errors
+    // such as "DeepSeek returned an unreadable model list." contain
+    // "deepseek".
+    if (lower.includes('model check request failed') || lower.includes('model check request timed out') || lower.includes('unreadable model list')) return 'model-check';
+    if (lower.includes('gmail') || lower.includes('mail')) return 'gmail';
+    if (lower.includes('calendar') || lower.includes('event')) return 'calendar';
+    if (lower.includes('github') || lower.includes('gh ')) return 'github';
+    if (lower.includes('backup')) return 'backup';
+    if (lower.includes('repo') || lower.includes('bootstrap')) return 'repo-bootstrap';
+    if (lower.includes('deepseek')) return 'deepseek-request';
+    return 'unknown';
+}
+
 /** Build a stable, short fingerprint from source + message. */
 export function fingerprintError(source: ErrorSource, message: string): string {
     const normalized = `${source}:${(message ?? '').trim().replace(/\s+/g, ' ').slice(0, 500)}`;

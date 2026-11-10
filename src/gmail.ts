@@ -350,19 +350,52 @@ function base64UrlEncode(value: string): string {
     return Buffer.from(value, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+/**
+ * Pure helper: find a header value inside a Gmail API `payload.headers` array
+ * (case-insensitive). Returns '' when absent.
+ */
+export function findGmailHeader(headers: Array<{ name?: string; value?: string }> | undefined, name: string): string {
+    const header = (headers ?? []).find((h) => (h.name ?? '').toLowerCase() === name.toLowerCase());
+    return header?.value ?? '';
+}
+
+/**
+ * Fetch snippet + From/Subject/Date headers for a single message using the
+ * `format=metadata` endpoint. The Gmail `messages.list` endpoint only returns
+ * `id` and `threadId`, so per-message metadata must be fetched separately.
+ * Failures resolve to empty metadata so one bad message never breaks the list.
+ */
+async function fetchMessageMetadata(accessToken: string, messageId: string): Promise<{ snippet: string; from: string; subject: string; date: string }> {
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`;
+    const result = await httpsRequestJson(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
+    const headers = (result.payload?.headers ?? []) as Array<{ name?: string; value?: string }>;
+    return {
+        snippet: typeof result.snippet === 'string' ? result.snippet : '',
+        from: findGmailHeader(headers, 'From'),
+        subject: findGmailHeader(headers, 'Subject'),
+        date: findGmailHeader(headers, 'Date'),
+    };
+}
+
 async function listMessages(accessToken: string, args: GmailToolArgs): Promise<GmailResult['messages']> {
     const maxResults = Math.max(1, Math.min(50, Math.floor(args.maxResults ?? 10)));
     const q = args.query ? `&q=${encodeURIComponent(args.query)}` : '';
     const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${maxResults}${q}`;
     const result = await httpsRequestJson(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
     const items = result.messages ?? [];
-    return items.map((item: any) => ({
-        id: item.id ?? '',
-        threadId: item.threadId ?? '',
-        snippet: '',
-        from: '',
-        subject: '',
-        date: '',
+    // Enrich each message with snippet/From/Subject/Date: messages.list only
+    // returns ids, so fetch metadata in parallel. Individual failures degrade
+    // gracefully to empty strings rather than failing the whole listing.
+    return Promise.all(items.map(async (item: any): Promise<NonNullable<GmailResult['messages']>[number]> => {
+        const meta = await fetchMessageMetadata(accessToken, item.id).catch(() => ({ snippet: '', from: '', subject: '', date: '' }));
+        return {
+            id: item.id ?? '',
+            threadId: item.threadId ?? '',
+            snippet: meta.snippet,
+            from: meta.from,
+            subject: meta.subject,
+            date: meta.date,
+        };
     }));
 }
 
@@ -374,12 +407,8 @@ async function readMessage(accessToken: string, messageId: string): Promise<stri
     const result = await httpsRequestJson(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
     const parts = result.payload?.parts ?? [];
     const headers = result.payload?.headers ?? [];
-    const parseHeader = (name: string) => {
-        const header = headers.find((h: any) => (h.name ?? '').toLowerCase() === name.toLowerCase());
-        return header?.value ?? '';
-    };
-    const from = parseHeader('From');
-    const subject = parseHeader('Subject');
+    const from = findGmailHeader(headers, 'From');
+    const subject = findGmailHeader(headers, 'Subject');
 
     // Recurse through MIME parts to find text/plain or text/html bodies.
     const collectText = (part: any): string => {
@@ -485,11 +514,8 @@ export async function runConfirmedGmailMutation(args: GmailToolArgs, tokens: OAu
             const original = await httpsRequestJson(originalUrl, 'GET', undefined, { Authorization: `Bearer ${tokens.access_token}` });
 
             const headers = (original.payload?.headers ?? []) as Array<{ name?: string; value?: string }>;
-            const findHeader = (name: string) =>
-                headers.find((h) => (h.name ?? '').toLowerCase() === name.toLowerCase())?.value ?? '';
-
-            const originalSubject = findHeader('Subject');
-            const originalFrom = findHeader('From');
+            const originalSubject = findGmailHeader(headers, 'Subject');
+            const originalFrom = findGmailHeader(headers, 'From');
 
             // Prepend "Re:" if not already present.
             const subject = /^re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;

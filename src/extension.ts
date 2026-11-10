@@ -50,6 +50,7 @@ import {
     formatLogList,
     clearErrorLog,
     bumpRepairAttempts,
+    classifySource,
     ErrorSource,
 } from './self-heal';
 
@@ -73,20 +74,6 @@ function summarizeConversation(messages: ChatMessage[]): string {
 
     const summary = firstSentence || firstUserMessage;
     return summary.length > 42 ? `${summary.slice(0, 39).trim()}...` : summary;
-}
-
-function classifySource(error: unknown): ErrorSource {
-    const message = error instanceof Error ? error.message : String(error);
-    const lower = message.toLowerCase();
-    if (lower.includes('gmail') || lower.includes('mail')) return 'gmail';
-    if (lower.includes('calendar') || lower.includes('event')) return 'calendar';
-    if (lower.includes('github') || lower.includes('gh ')) return 'github';
-    if (lower.includes('backup')) return 'backup';
-    if (lower.includes('model')) return 'model-check';
-    if (lower.includes('repo') || lower.includes('bootstrap')) return 'repo-bootstrap';
-    if (lower.includes('glm') || lower.includes('zhipu') || lower.includes('bigmodel')) return 'glm-request';
-    if (lower.includes('deepseek')) return 'deepseek-request';
-    return 'unknown';
 }
 
 function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<string, unknown>) => Promise<string> {
