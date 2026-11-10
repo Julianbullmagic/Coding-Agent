@@ -6,6 +6,7 @@ import * as path from 'path';
 import { RagConversation, retrieveRelevantContext as retrieveRag } from './rag';
 import type { CalendarToolArgs } from './google-calendar';
 import type { GmailToolArgs } from './gmail';
+import type { BusinessToolArgs } from './business-reviews';
 import {
     Provider,
     resolveProvider,
@@ -270,15 +271,29 @@ const TOOLS = [
     },
     {
         type: 'function',
-        name: 'reply_email',
-        description: 'Reply to an existing Gmail message by ID. Requires user confirmation before executing.',
+        name: 'list_business_reviews',
+        description: 'List Google Business Profile reviews for the user business location, including existing replies. Read-only; runs without confirmation.',
         parameters: {
             type: 'object',
             properties: {
-                messageId: { type: 'string', description: 'The Gmail message ID to reply to.' },
-                body: { type: 'string', description: 'Reply body text.' },
+                pageSize: { type: 'number', description: 'Max reviews (default 20, max 50).' },
+                orderBy: { type: 'string', description: 'Sort order: rating, rating desc, or updateTime desc.' },
             },
-            required: ['messageId', 'body'],
+            required: [],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
+        name: 'reply_business_review',
+        description: 'Reply to a Google Business Profile review publicly. Requires user confirmation before executing.',
+        parameters: {
+            type: 'object',
+            properties: {
+                reviewName: { type: 'string', description: 'Full review name: accounts/{account}/locations/{location}/reviews/{review}.' },
+                replyComment: { type: 'string', description: 'The reply text to post publicly.' },
+            },
+            required: ['reviewName', 'replyComment'],
             additionalProperties: false,
         },
     },
@@ -577,6 +592,7 @@ export class CodingAgent {
         private activeConversationId?: () => string | undefined,
         private calendarHandler?: (args: Record<string, unknown>) => Promise<string>,
         private gmailHandler?: (args: Record<string, unknown>) => Promise<string>,
+        private businessReviewsHandler?: (args: Record<string, unknown>) => Promise<string>,
     ) {
         this.deepseekModelId = (deepseekModelId && deepseekModelId.trim()) || 'deepseek-v4-pro';
         this.glmModelId = GLM_DEFAULT_MODEL;
@@ -645,7 +661,7 @@ export class CodingAgent {
                     });
                 }
                 return JSON.stringify({ error: 'Gmail is not connected in this session.' });
-            }
+            } else if (name === 'list_business_reviews' || name === 'reply_business_review') {                if (this.businessReviewsHandler) {                    return await this.businessReviewsHandler({                        action: name === 'list_business_reviews' ? 'list_reviews' : 'reply_review',                        ...args,                    });                }                return JSON.stringify({ error: 'Google Business Profile is not connected in this session.' });            }
             return JSON.stringify({ error: 'Invalid or unsupported web-tool arguments.' });
         } catch (error) {
             const message = error instanceof Error ? error.message : 'The web tool failed.';

@@ -41,6 +41,19 @@ import {
     isGmailReadOnly,
 } from './gmail';
 import {
+    BUSINESS_TOKENS_SECRET,
+    BusinessToolArgs,
+    buildBusinessAuthorizationUrl,
+    buildBusinessConfirmationMessage,
+    exchangeBusinessCodeForTokens,
+    refreshBusinessAccessToken,
+    runBusinessTool,
+    runConfirmedBusinessMutation,
+    normalizeTokens as normalizeBusinessTokens,
+    isTokenExpired as isBusinessTokenExpired,
+    isBusinessReadOnly,
+} from './business-reviews';
+import {
     recordError,
     resolveSource,
     getUnresolvedErrors,
@@ -267,6 +280,106 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
         }
 
         const result = await runConfirmedGmailMutation(args, tokens);
+        if (!result.ok) {
+            void vscode.window.showErrorMessage(result.message);
+        }
+        return JSON.stringify(result);
+    };
+}
+
+function createBusinessReviewsHandler(context: vscode.ExtensionContext): (args: Record<string, unknown>) => Promise<string> {
+    return async (rawArgs: Record<string, unknown>): Promise<string> => {
+        const args = rawArgs as unknown as BusinessToolArgs;
+
+        const credentials = {
+            clientId: await context.secrets.get(GMAIL_CLIENT_ID_SECRET) ?? '',
+            clientSecret: await context.secrets.get(GMAIL_CLIENT_SECRET_SECRET) ?? '',
+        };
+        if (!credentials.clientId || !credentials.clientSecret) {
+            const message = 'Google Business Profile is not configured. Run "Coding Agent: Configure Google Calendar" (Ctrl+Shift+P), paste your Desktop-app Client ID and Secret, then reload.';
+            void vscode.window.showErrorMessage(message);
+            return JSON.stringify({ error: message });
+        }
+
+        const readTokens = async () => {
+            const stored = context.globalState.get<unknown>(BUSINESS_TOKENS_SECRET);
+            if (typeof stored === 'string') {
+                try { return normalizeBusinessTokens(JSON.parse(stored)); } catch { return null; }
+            }
+            return normalizeBusinessTokens(stored);
+        };
+        const saveTokens = async (tokens: { access_token: string; refresh_token?: string; expires_at?: number }) => {
+            await context.globalState.update(BUSINESS_TOKENS_SECRET, tokens);
+        };
+
+        const authorize = async (): Promise<{ access_token: string; refresh_token?: string; expires_at?: number }> => {
+            const authUrl = buildBusinessAuthorizationUrl(credentials.clientId);
+            void vscode.window.showInformationMessage('Opening browser to authorize Google Business Profile. After allowing access, paste the code from the redirected URL.');
+            await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+            const code = await vscode.window.showInputBox({
+                prompt: 'Paste the authorization code from the browser after allowing access.',
+                password: true,
+                ignoreFocusOut: true,
+            });
+            if (!code) throw new Error('Authorization cancelled.');
+            const exchanged = await exchangeBusinessCodeForTokens(credentials.clientId, credentials.clientSecret, code.trim());
+            await saveTokens(exchanged);
+            return exchanged;
+        };
+
+        if (isBusinessReadOnly(args.action)) {
+            const result = await runBusinessTool(
+                args,
+                readTokens,
+                async () => credentials,
+                saveTokens,
+                async () => undefined,
+            );
+            if (!result.needsAuthorization) {
+                return JSON.stringify(result);
+            }
+            try {
+                await authorize();
+                const retried = await runBusinessTool(args, readTokens, async () => credentials, saveTokens, async () => undefined);
+                return JSON.stringify(retried);
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : 'Unknown error';
+                const message = 'Google Business Profile authorization failed: ' + detail;
+                void vscode.window.showErrorMessage(message);
+                return JSON.stringify({ ok: false, message });
+            }
+        }
+
+        // Mutations require confirmation first.
+        const confirmMessage = buildBusinessConfirmationMessage(args);
+        const choice = await vscode.window.showWarningMessage(
+            confirmMessage,
+            { modal: true },
+            'Reply',
+            'Cancel',
+        );
+        if (choice !== 'Reply') {
+            return JSON.stringify({ ok: false, message: 'Review reply cancelled by the user.' });
+        }
+
+        let tokens = (await readTokens()) ?? (await authorize());
+
+        if (isBusinessTokenExpired(tokens)) {
+            if (tokens.refresh_token) {
+                tokens = await refreshBusinessAccessToken(credentials.clientId, credentials.clientSecret, tokens.refresh_token);
+                await saveTokens(tokens);
+            } else {
+                return JSON.stringify({ error: 'Google Business Profile token expired. Re-authorize by reconfiguring Google credentials.' });
+            }
+        }
+
+        if (!tokens.access_token) {
+            const message = 'Google Business Profile is not authorized yet.';
+            void vscode.window.showErrorMessage(message);
+            return JSON.stringify({ error: message });
+        }
+
+        const result = await runConfirmedBusinessMutation(args, tokens);
         if (!result.ok) {
             void vscode.window.showErrorMessage(result.message);
         }
@@ -543,6 +656,7 @@ export function activate(context: vscode.ExtensionContext) {
         () => context.workspaceState.get<string>('codingAgent.activeConversation'),
         createCalendarHandler(context),
         createGmailHandler(context),
+        createBusinessReviewsHandler(context),
     );
 
     void (async () => {
@@ -769,6 +883,7 @@ export function activate(context: vscode.ExtensionContext) {
         const forgetGoogleTokens = vscode.commands.registerCommand('codingAgent.forgetGoogleTokens', async () => {
         await context.globalState.update(GOOGLE_TOKENS_SECRET, undefined);
         await context.globalState.update(GMAIL_TOKENS_SECRET, undefined);
+        await context.globalState.update(BUSINESS_TOKENS_SECRET, undefined);
         void vscode.window.showInformationMessage('Calendar and Gmail authorization cleared. The agent will re-open the browser on next use.');
     });
 

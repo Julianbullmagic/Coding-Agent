@@ -307,7 +307,7 @@ export async function listReviews(accessToken: string, args: BusinessToolArgs): 
     const url = `${MYBUSINESS_BASE}/${location}/reviews?${params.toString()}`;
     const result = await httpsRequestJson(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
 
-    const reviews: BusinessResult['reviews'] = (result.reviews ?? []).map((review: any) => ({
+    const reviews: NonNullable<BusinessResult['reviews']> = (result.reviews ?? []).map((review: any) => ({
         name: review.name ?? '',
         rating: review.starRating === 'FIVE' ? 5 : review.starRating === 'FOUR' ? 4 : review.starRating === 'THREE' ? 3 : review.starRating === 'TWO' ? 2 : review.starRating === 'ONE' ? 1 : 0,
         comment: review.comment,

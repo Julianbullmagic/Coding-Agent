@@ -1,9 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import fs from 'fs';
 
-const p = 'package.json';
-let s = readFileSync(p, 'utf8');
-s = s.replace('"version": "0.3.5"', '"version": "0.3.6"');
-writeFileSync(p, s);
-
-const parsed = JSON.parse(s);
-console.log('version is now', parsed.version);
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const [major, minor, patch] = pkg.version.split('.').map(Number);
+pkg.version = `${major}.${minor}.${patch + 1}`;
+fs.writeFileSync('package.json', JSON.stringify(pkg, null, 4) + '\n');
+console.log('Bumped version to ' + pkg.version);
