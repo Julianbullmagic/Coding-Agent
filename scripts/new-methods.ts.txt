@@ -1,0 +1,227 @@
+    // Execute a single named tool and return its result as a JSON-ish string.
+    private async executeTool(name: string, rawArgs: string, workspacePath: string, apiKey: string, provider: Provider): Promise<string> {
+        let args: Record<string, unknown>;
+        try {
+            args = JSON.parse(rawArgs || '{}') as Record<string, unknown>;
+        } catch {
+            args = {};
+        }
+        try {
+            if (name === 'list_files') {
+                return await listWorkspaceFiles(workspacePath, typeof args.path === 'string' ? args.path : '');
+            } else if (name === 'read_file' && typeof args.path === 'string') {
+                return await readWorkspaceFile(workspacePath, args.path);
+            } else if (name === 'write_file' && typeof args.path === 'string' && typeof args.content === 'string') {
+                return await writeWorkspaceFile(workspacePath, args.path, args.content);
+            } else if (name === 'create_directory' && typeof args.path === 'string') {
+                return await createWorkspaceDirectory(workspacePath, args.path);
+            } else if (name === 'search_searxng') {
+                return JSON.stringify({ error: 'SearXNG is disabled.' });
+            } else if (name === 'retrieve_relevant_context' && typeof args.query === 'string') {
+                return await this.retrieveContext(args.query);
+            } else if (name === 'fetch_page' && typeof args.url === 'string') {
+                if (provider === 'kimi') {
+                    return await fetchPageDirect(args.url);
+                }
+                return await fetchPageDeepSeek(apiKey, args.url);
+            } else if (name === 'run_command' && typeof args.command === 'string') {
+                const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 120000;
+                return await runShellCommand(workspacePath, args.command, timeoutMs);
+            } else if (name === 'sign_in_to_github') {
+                return await signInToGitHub(workspacePath);
+            } else if (name === 'create_github_repository') {
+                return await createGitHubRepository(workspacePath, args);
+            } else if (name === 'commit_and_push') {
+                return await commitAndPush(workspacePath, args);
+            } else if (name === 'list_calendar_events' || name === 'create_calendar_event' || name === 'update_calendar_event' || name === 'delete_calendar_event') {
+                if (this.calendarHandler) {
+                    return await this.calendarHandler({
+                        action: name === 'list_calendar_events' ? 'list' : name === 'create_calendar_event' ? 'create' : name === 'update_calendar_event' ? 'update' : 'delete',
+                        ...args,
+                    });
+                }
+                return JSON.stringify({ error: 'Google Calendar is not connected in this session.' });
+            } else if (name === 'list_emails' || name === 'search_emails' || name === 'read_email' || name === 'send_email' || name === 'reply_email') {
+                if (this.gmailHandler) {
+                    return await this.gmailHandler({
+                        action: name === 'list_emails' ? 'list' : name === 'search_emails' ? 'search' : name === 'read_email' ? 'read' : name === 'send_email' ? 'send' : 'reply',
+                        ...args,
+                    });
+                }
+                return JSON.stringify({ error: 'Gmail is not connected in this session.' });
+            }
+            return JSON.stringify({ error: 'Invalid or unsupported web-tool arguments.' });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'The web tool failed.';
+            return JSON.stringify({ error: message });
+        }
+    }
+
+    private scopedInstructions(workspacePath: string): string {
+        return SYSTEM_PROMPT + ' The workspace folder you may access is exactly: ' + JSON.stringify(workspacePath) + '. Use list_files, read_file, write_file, and create_directory relative to this folder only. Do not read or modify anything outside it.';
+    }
+
+    async provideSuggestions(
+        prompt: string,
+        apiKey: string,
+        searxngBaseUrl: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
+        workspacePath: string = process.cwd(),
+        maxToolRounds: number = 1000,
+        provider: Provider = 'deepseek',
+    ): Promise<string> {
+        return provider === 'kimi'
+            ? this.provideKimiSuggestions(prompt, apiKey, history, workspacePath, maxToolRounds)
+            : this.provideDeepSeekSuggestions(prompt, apiKey, history, workspacePath, maxToolRounds);
+    }
+
+    private async provideDeepSeekSuggestions(
+        prompt: string,
+        apiKey: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath: string,
+        maxToolRounds: number,
+    ): Promise<string> {
+        const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
+        let input: string | ResponseOutputItem[] = history.length === 0
+            ? prompt
+            : [
+                ...history.map((message) => ({
+                    type: 'message',
+                    role: message.role === 'assistant' ? 'assistant' : 'user',
+                    content: [{
+                        type: message.role === 'assistant' ? 'output_text' : 'input_text',
+                        text: message.content,
+                    }],
+                })),
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: prompt }],
+                },
+            ];
+
+        const instructions = this.scopedInstructions(workspacePath);
+
+        for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            const requestBody: string = JSON.stringify({
+                model: this.modelId,
+                instructions,
+                input,
+                reasoning: { effort: 'none' },
+                max_output_tokens: 8192,
+                tools: TOOLS,
+                tool_choice: 'auto',
+            });
+            const response: DeepSeekResponse | null = await requestJson<DeepSeekResponse | null>(
+                new URL('https://api.deepseek.com/responses'),
+                requestBody,
+                apiKey,
+            );
+            if (!response) {
+                throw new Error('DeepSeek returned an empty response body.');
+            }
+            const output: ResponseOutputItem[] = response.output ?? [];
+            const calls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'function_call');
+            const webCalls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'web_search_call');
+
+            if (calls.length === 0 && webCalls.length === 0) {
+                const text = getResponseText(response);
+                if (!text) {
+                    throw new Error('DeepSeek returned an empty response.');
+                }
+                return text;
+            }
+            if (round === normalizedMaxToolRounds) {
+                throw new Error('The agent reached the maximum tool-operation limit for this turn.');
+            }
+
+            const prev: ResponseOutputItem[] = typeof input === 'string' ? [{ role: 'user', content: input }] : input;
+
+            const toolOutputs: ResponseOutputItem[] = await Promise.all(calls.map(async (call: ResponseOutputItem): Promise<ResponseOutputItem> => {
+                const result = await this.executeTool(call.name ?? '', call.arguments ?? '{}', workspacePath, apiKey, 'deepseek');
+                return { type: 'function_call_output', call_id: call.call_id ?? '', output: result };
+            }));
+
+            const webSearchOutputs: ResponseOutputItem[] = webCalls.map((call: ResponseOutputItem): ResponseOutputItem => {
+                const resultsText = (call.results ?? [])
+                    .slice(0, 5)
+                    .map((r) => `${r.title ?? ''}\n${r.url ?? ''}\n${(r.content ?? r.snippet ?? r.text ?? '').slice(0, 800)}`)
+                    .filter(Boolean)
+                    .join('\n\n');
+                return {
+                    type: 'web_search_call_output',
+                    call_id: call.call_id ?? '',
+                    output: resultsText || JSON.stringify({ results: call.results ?? [], note: 'Web search returned no results.' }),
+                };
+            });
+
+            input = [...prev, ...output, ...toolOutputs, ...webSearchOutputs];
+        }
+
+        throw new Error('DeepSeek did not complete the response.');
+    }
+
+    private async provideKimiSuggestions(
+        prompt: string,
+        apiKey: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath: string,
+        maxToolRounds: number,
+    ): Promise<string> {
+        const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
+        const cfg = resolveProvider('kimi', this.modelId);
+        const endpoint = new URL(cfg.endpoint);
+
+        type KimiMessage = { role: string; content: string | null; tool_calls?: KimiToolCall[]; tool_call_id?: string };
+
+        const systemMessage: KimiMessage = { role: 'system', content: this.scopedInstructions(workspacePath) };
+        const messages: KimiMessage[] = [
+            systemMessage,
+            ...history.map((message): KimiMessage => ({ role: message.role, content: message.content })),
+            { role: 'user', content: prompt },
+        ];
+
+        for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            const requestBody: string = JSON.stringify({
+                model: cfg.model,
+                messages,
+                max_tokens: 8192,
+                tools: KIMI_TOOL_DEFINITIONS,
+                tool_choice: 'auto',
+            });
+            const response = await requestJson<KimiCompletionResponse>(
+                endpoint,
+                requestBody,
+                apiKey,
+            );
+            const choice = response.choices?.[0];
+            const message = choice?.message;
+            if (!message) {
+                throw new Error('Kimi returned an empty response.');
+            }
+            const toolCalls = message.tool_calls ?? [];
+            if (toolCalls.length === 0) {
+                const text = (message.content ?? '').trim();
+                if (!text) {
+                    throw new Error('Kimi returned an empty response.');
+                }
+                return text;
+            }
+            if (round === normalizedMaxToolRounds) {
+                throw new Error('The agent reached the maximum tool-operation limit for this turn.');
+            }
+
+            messages.push({ role: 'assistant', content: message.content, tool_calls: toolCalls });
+
+            for (const toolCall of toolCalls) {
+                const toolName = toolCall.function?.name ?? '';
+                const rawArgs = toolCall.function?.arguments ?? '{}';
+                const result = await this.executeTool(toolName, rawArgs, workspacePath, apiKey, 'kimi');
+                messages.push({ role: 'tool', content: result, tool_call_id: toolCall.id });
+            }
+        }
+
+        throw new Error('Kimi did not complete the response.');
+    }
+

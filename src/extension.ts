@@ -9,6 +9,7 @@ import { ensureRepoOnOpen } from './repo-bootstrap';
 import { detectWorkspaceFolder } from './path-detection';
 import { RagConversation, retrieveRelevantContext, shouldRetrieve, formatRetrievedContext } from './rag';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
+import { GLM_API_KEY_SECRET, PROVIDER_KEY, GLM_MODEL_KEY, Provider } from './providers';
 import {
     GOOGLE_CLIENT_ID_SECRET,
     GOOGLE_CLIENT_SECRET_SECRET,
@@ -39,8 +40,21 @@ import {
     isTokenExpired as isGmailTokenExpired,
     isGmailReadOnly,
 } from './gmail';
+import {
+    recordError,
+    resolveSource,
+    getUnresolvedErrors,
+    getAllErrors,
+    buildRepairPrompt,
+    summarizeLog,
+    formatLogList,
+    clearErrorLog,
+    bumpRepairAttempts,
+    ErrorSource,
+} from './self-heal';
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
+const DEEPSEEK_MODEL_KEY = 'codingAgent.model';
 
 interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 interface Conversation { id: string; title: string; updatedAt: number; messages: ChatMessage[]; }
@@ -59,6 +73,20 @@ function summarizeConversation(messages: ChatMessage[]): string {
 
     const summary = firstSentence || firstUserMessage;
     return summary.length > 42 ? `${summary.slice(0, 39).trim()}...` : summary;
+}
+
+function classifySource(error: unknown): ErrorSource {
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    if (lower.includes('gmail') || lower.includes('mail')) return 'gmail';
+    if (lower.includes('calendar') || lower.includes('event')) return 'calendar';
+    if (lower.includes('github') || lower.includes('gh ')) return 'github';
+    if (lower.includes('backup')) return 'backup';
+    if (lower.includes('model')) return 'model-check';
+    if (lower.includes('repo') || lower.includes('bootstrap')) return 'repo-bootstrap';
+    if (lower.includes('glm') || lower.includes('zhipu') || lower.includes('bigmodel')) return 'glm-request';
+    if (lower.includes('deepseek')) return 'deepseek-request';
+    return 'unknown';
 }
 
 function createCalendarHandler(context: vscode.ExtensionContext): (args: Record<string, unknown>) => Promise<string> {
@@ -215,6 +243,7 @@ function createGmailHandler(context: vscode.ExtensionContext): (args: Record<str
             } catch (error) {
                 const detail = error instanceof Error ? error.message : 'Unknown error';
                 const message = `Gmail authorization failed: ${detail}`;
+                await recordError(context, 'gmail', error);
                 void vscode.window.showErrorMessage(message);
                 return JSON.stringify({ ok: false, message });
             }
@@ -273,7 +302,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         } else {
             this.postState(view);
         }
-        view.webview.onDidReceiveMessage(async (message: { type: string; id?: string; text?: string }) => {
+        view.webview.onDidReceiveMessage(async (message: { type: string; id?: string; text?: string; provider?: string }) => {
             if (message.type === 'ready') {
                 this.postState(view);
             } else if (message.type === 'new') {
@@ -290,8 +319,31 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             } else if (message.type === 'setApiKey') {
                 await vscode.commands.executeCommand('codingAgent.setApiKey');
                 this.postState(view);
+            } else if (message.type === 'setProvider' && message.provider) {
+                await this.setProvider(message.provider);
+                this.postState(view);
+            } else if (message.type === 'setGLMKey') {
+                await vscode.commands.executeCommand('codingAgent.setGLMApiKey');
+                this.postState(view);
             }
         });
+    }
+
+    private currentProvider(): Provider {
+        const stored = this.context.workspaceState.get<string>(PROVIDER_KEY);
+        return stored === 'glm' ? 'glm' : 'deepseek';
+    }
+
+    private async setProvider(provider: string): Promise<void> {
+        const normalized: Provider = provider === 'glm' ? 'glm' : 'deepseek';
+        await this.context.workspaceState.update(PROVIDER_KEY, normalized);
+        if (normalized === 'deepseek') {
+            const model = vscode.workspace.getConfiguration('codingAgent').get<string>(DEEPSEEK_MODEL_KEY, 'deepseek-v4-pro');
+            this.agent.setModel(model);
+        } else {
+            const model = vscode.workspace.getConfiguration('codingAgent').get<string>(GLM_MODEL_KEY, 'glm-5.3');
+            this.agent.setModel(model);
+        }
     }
 
     private conversations(): Conversation[] {
@@ -363,9 +415,20 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             await this.context.globalState.update('codingAgent.pendingModelUpdate', undefined);
         }
 
-        const apiKey = await this.context.secrets.get(API_KEY_SECRET);
+        const provider = this.currentProvider();
+        const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
+        const modelId = vscode.workspace.getConfiguration('codingAgent').get<string>(modelKey, provider === 'glm' ? 'glm-5.3' : 'deepseek-v4-pro');
+        this.agent.setModel(modelId);
+
+        const apiKey = provider === 'glm'
+            ? await this.context.secrets.get(GLM_API_KEY_SECRET)
+            : await this.context.secrets.get(API_KEY_SECRET);
         if (!apiKey) {
-            await vscode.commands.executeCommand('codingAgent.setApiKey');
+            if (provider === 'glm') {
+                await vscode.commands.executeCommand('codingAgent.setGLMApiKey');
+            } else {
+                await vscode.commands.executeCommand('codingAgent.setApiKey');
+            }
             this.postState(view);
             return;
         }
@@ -392,10 +455,13 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
                     effectivePrompt = contextBlock + '\n\n---\n\nUser request: ' + text;
                 }
             }
-            const response = await this.agent.provideSuggestions(effectivePrompt, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds);
+            const response = await this.agent.provideSuggestions(effectivePrompt, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds, provider);
+            await resolveSource(this.context, provider === 'glm' ? 'glm-request' : 'deepseek-request');
             await this.save(conversation.id, [...messages, { role: 'assistant', content: response.trim() }]);
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
+            const source = classifySource(error);
+            await recordError(this.context, source, error);
             await this.save(conversation.id, [...messages, { role: 'assistant', content: `Request failed: ${detail}` }]);
         }
         this.postState(view);
@@ -414,14 +480,21 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             });
             return;
         }
-        void view.webview.postMessage({ type: 'state', conversations: this.conversations(), activeId: activeConversation.id, loading });
+        void view.webview.postMessage({
+            type: 'state',
+            conversations: this.conversations(),
+            activeId: activeConversation.id,
+            loading,
+            provider: this.currentProvider(),
+            model: this.agent.getModel(),
+        });
     }
 
     private html(): string {
         return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-        :root{color-scheme:light dark}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;font-family:var(--vscode-font-family);font-size:12px;color:var(--vscode-foreground);background:var(--vscode-sideBar-background)}.shell{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}.tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.tab{height:38px;border-radius:0;background:transparent;color:var(--vscode-foreground)}.tab.active{box-shadow:inset 0 -2px var(--vscode-focusBorder);background:var(--vscode-list-hoverBackground)}.panel{display:none!important;min-height:0;overflow:hidden}.panel.active{display:block!important}.sidebar{overflow-y:auto;padding:8px}.chat{min-width:0;height:100%}.chat.active{display:grid!important;grid-template-rows:minmax(0,1fr) auto}.messages{min-height:0;overflow-y:auto;padding:12px 10px}.message{margin:8px 0;padding:8px;border-radius:6px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.user{background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);margin-left:12px}.assistant{border-left:2px solid var(--vscode-focusBorder)}button{border:0;border-radius:4px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}.new{width:100%;min-height:36px;height:auto;margin-bottom:8px;padding:8px 6px;line-height:18px;white-space:normal}.conversation{display:block;width:100%;min-height:36px;height:auto;text-align:left;margin:3px 0;padding:7px 8px;background:transparent;color:var(--vscode-sideBar-foreground);white-space:normal;overflow-wrap:anywhere;line-height:16px}.conversation.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.conversation-row{display:flex;align-items:stretch;gap:4px}.conversation-row .conversation{flex:1;min-width:0}.delete-conversation{flex:0 0 24px;width:24px;height:24px;margin-top:6px;padding:0;line-height:22px;background:transparent;color:var(--vscode-descriptionForeground)}.delete-conversation:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.composer{display:flex;align-items:flex-end;gap:8px;padding:8px;border-top:1px solid var(--vscode-panel-border)}textarea{resize:none;flex:1;min-width:0;min-height:40px;padding:8px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}.send{flex:0 0 58px;width:58px;height:40px;padding:0;line-height:40px}.send:disabled{cursor:default;opacity:.55}.loading{opacity:.7}@media(max-width:280px){.composer{gap:4px;padding:6px}.send{flex-basis:48px;width:48px}}
-        </style></head><body><div class="shell"><nav class="tabs" aria-label="Coding Agent views"><button class="tab" id="historyTab">History</button><button class="tab active" id="chatTab">Chat</button></nav><aside class="panel sidebar" id="historyPanel"><button class="new" id="new">+ New chat</button><div id="history"></div></aside><main class="panel chat active" id="chatPanel"><div class="messages" id="messages"></div><div class="composer"><textarea id="input" rows="1" placeholder="Message DeepSeek Coding Agent"></textarea><button class="send" id="send">Send</button></div></main></div><script>
-        const vscode=acquireVsCodeApi();let state={conversations:[],activeId:'',loading:false};const messages=document.getElementById('messages'),history=document.getElementById('history'),input=document.getElementById('input'),send=document.getElementById('send'),chatTab=document.getElementById('chatTab'),historyTab=document.getElementById('historyTab'),chatPanel=document.getElementById('chatPanel'),historyPanel=document.getElementById('historyPanel');function selectTab(tab){const showChat=tab==='chat';chatTab.classList.toggle('active',showChat);historyTab.classList.toggle('active',!showChat);chatPanel.classList.toggle('active',showChat);historyPanel.classList.toggle('active',!showChat)}chatTab.onclick=()=>selectTab('chat');historyTab.onclick=()=>selectTab('history');document.getElementById('new').onclick=()=>{vscode.postMessage({type:'new'});selectTab('chat')};send.onclick=()=>{const text=input.value.trim();if(!text||state.loading)return;input.value='';vscode.postMessage({type:'send',text})};input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send.click()}};addEventListener('message',event=>{if(event.data.type!=='state')return;state=event.data;history.replaceChildren();for(const conversation of state.conversations||[]){const row=document.createElement('div');row.className='conversation-row';const button=document.createElement('button');button.className='conversation'+(conversation.id===state.activeId?' active':'');button.textContent=conversation.title;button.title=conversation.title;button.onclick=()=>{vscode.postMessage({type:'open',id:conversation.id});selectTab('chat')};const remove=document.createElement('button');remove.className='delete-conversation';remove.textContent='x';remove.title='Delete conversation';remove.setAttribute('aria-label','Delete conversation');remove.onclick=()=>vscode.postMessage({type:'delete',id:conversation.id});row.appendChild(button);row.appendChild(remove);history.appendChild(row)}const conversation=(state.conversations||[]).find(item=>item.id===state.activeId)||(state.conversations&&state.conversations[0]);messages.replaceChildren();for(const message of conversation?conversation.messages:[]){const element=document.createElement('div');element.className='message '+message.role;element.textContent=message.content;messages.appendChild(element)}if(state.loading){const element=document.createElement('div');element.className='message assistant loading';element.textContent='Thinking...';messages.appendChild(element)}send.disabled=state.loading;messages.scrollTop=messages.scrollHeight});vscode.postMessage({type:'ready'});
+        :root{color-scheme:light dark}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;font-family:var(--vscode-font-family);font-size:12px;color:var(--vscode-foreground);background:var(--vscode-sideBar-background)}.shell{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}.tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.tab{height:38px;border-radius:0;background:transparent;color:var(--vscode-foreground)}.tab.active{box-shadow:inset 0 -2px var(--vscode-focusBorder);background:var(--vscode-list-hoverBackground)}.panel{display:none!important;min-height:0;overflow:hidden}.panel.active{display:block!important}.sidebar{overflow-y:auto;padding:8px}.chat{min-width:0;height:100%}.chat.active{display:grid!important;grid-template-rows:auto minmax(0,1fr) auto}.modelbar{display:flex;gap:6px;padding:8px 10px 0}.modelbtn{flex:1;height:28px;padding:0 8px;border-radius:4px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);cursor:pointer}.modelbtn.active{background:var(--vscode-button-background);color:var(--vscode-button-foreground);border-color:var(--vscode-button-background)}.modelbtn:disabled{opacity:.55;cursor:default}.messages{min-height:0;overflow-y:auto;padding:12px 10px}.message{margin:8px 0;padding:8px;border-radius:6px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.user{background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);margin-left:12px}.assistant{border-left:2px solid var(--vscode-focusBorder)}button{border:0;border-radius:4px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}.new{width:100%;min-height:36px;height:auto;margin-bottom:8px;padding:8px 6px;line-height:18px;white-space:normal}.conversation{display:block;width:100%;min-height:36px;height:auto;text-align:left;margin:3px 0;padding:7px 8px;background:transparent;color:var(--vscode-sideBar-foreground);white-space:normal;overflow-wrap:anywhere;line-height:16px}.conversation.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.conversation-row{display:flex;align-items:stretch;gap:4px}.conversation-row .conversation{flex:1;min-width:0}.delete-conversation{flex:0 0 24px;width:24px;height:24px;margin-top:6px;padding:0;line-height:22px;background:transparent;color:var(--vscode-descriptionForeground)}.delete-conversation:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.composer{display:flex;align-items:flex-end;gap:8px;padding:8px;border-top:1px solid var(--vscode-panel-border)}textarea{resize:none;flex:1;min-width:0;min-height:40px;padding:8px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}.send{flex:0 0 58px;width:58px;height:40px;padding:0;line-height:40px}.send:disabled{cursor:default;opacity:.55}.loading{opacity:.7}@media(max-width:280px){.composer{gap:4px;padding:6px}.send{flex-basis:48px;width:48px}}
+        </style></head><body><div class="shell"><nav class="tabs" aria-label="Coding Agent views"><button class="tab" id="historyTab">History</button><button class="tab active" id="chatTab">Chat</button></nav><aside class="panel sidebar" id="historyPanel"><button class="new" id="new">+ New chat</button><div id="history"></div></aside><main class="panel chat active" id="chatPanel"><div class="modelbar"><button class="modelbtn" id="modelDeepseek">DeepSeek</button><button class="modelbtn" id="modelGlm">GLM</button></div><div class="messages" id="messages"></div><div class="composer"><textarea id="input" rows="1" placeholder="Message DeepSeek Coding Agent"></textarea><button class="send" id="send">Send</button></div></main></div><script>
+        const vscode=acquireVsCodeApi();let state={conversations:[],activeId:'',loading:false};const messages=document.getElementById('messages'),history=document.getElementById('history'),input=document.getElementById('input'),send=document.getElementById('send'),chatTab=document.getElementById('chatTab'),historyTab=document.getElementById('historyTab'),chatPanel=document.getElementById('chatPanel'),historyPanel=document.getElementById('historyPanel'),modelDeepseek=document.getElementById('modelDeepseek'),modelGlm=document.getElementById('modelGlm');modelDeepseek.onclick=()=>{if(state.provider!=='deepseek')vscode.postMessage({type:'setProvider',provider:'deepseek'})};modelGlm.onclick=()=>{if(state.provider!=='glm')vscode.postMessage({type:'setProvider',provider:'glm'})};function selectTab(tab){const showChat=tab==='chat';chatTab.classList.toggle('active',showChat);historyTab.classList.toggle('active',!showChat);chatPanel.classList.toggle('active',showChat);historyPanel.classList.toggle('active',!showChat)}chatTab.onclick=()=>selectTab('chat');historyTab.onclick=()=>selectTab('history');document.getElementById('new').onclick=()=>{vscode.postMessage({type:'new'});selectTab('chat')};send.onclick=()=>{const text=input.value.trim();if(!text||state.loading)return;input.value='';vscode.postMessage({type:'send',text})};input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send.click()}};addEventListener('message',event=>{if(event.data.type!=='state')return;state=event.data;modelDeepseek.classList.toggle('active',state.provider!=='glm');modelGlm.classList.toggle('active',state.provider==='glm');history.replaceChildren();for(const conversation of state.conversations||[]){const row=document.createElement('div');row.className='conversation-row';const button=document.createElement('button');button.className='conversation'+(conversation.id===state.activeId?' active':'');button.textContent=conversation.title;button.title=conversation.title;button.onclick=()=>{vscode.postMessage({type:'open',id:conversation.id});selectTab('chat')};const remove=document.createElement('button');remove.className='delete-conversation';remove.textContent='x';remove.title='Delete conversation';remove.setAttribute('aria-label','Delete conversation');remove.onclick=()=>vscode.postMessage({type:'delete',id:conversation.id});row.appendChild(button);row.appendChild(remove);history.appendChild(row)}const conversation=(state.conversations||[]).find(item=>item.id===state.activeId)||(state.conversations&&state.conversations[0]);messages.replaceChildren();for(const message of conversation?conversation.messages:[]){const element=document.createElement('div');element.className='message '+message.role;element.textContent=message.content;messages.appendChild(element)}if(state.loading){const element=document.createElement('div');element.className='message assistant loading';element.textContent='Thinking...';messages.appendChild(element)}send.disabled=state.loading;messages.scrollTop=messages.scrollHeight});vscode.postMessage({type:'ready'});
         </script></body></html>`;
     }
 }
@@ -442,6 +515,7 @@ function startAutoBackup(context: vscode.ExtensionContext): { dispose(): void } 
             await backupWorkspaceToGitHub(workspacePath(), 'coding-agent-backup');
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
+            await recordError(context, 'backup', error);
             void vscode.window.showWarningMessage(`Automatic GitHub backup failed: ${detail}`);
         } finally {
             running = false;
@@ -494,6 +568,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown repo bootstrap error';
+            await recordError(context, 'repo-bootstrap', error);
             void vscode.window.showWarningMessage('GitHub repo bootstrap failed: ' + detail);
         }
     })();
@@ -532,6 +607,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             } catch (error) {
                 const message = error instanceof Error ? error.message : 'Unknown model-check error';
+                await recordError(context, 'model-check', error);
                 void vscode.window.showWarningMessage(`Automatic DeepSeek model check failed: ${message}`);
             }
         })();
@@ -641,6 +717,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
+            await recordError(context, 'github', error);
             void vscode.window.showErrorMessage(`GitHub setup failed: ${detail}`);
         }
     });
@@ -655,6 +732,7 @@ export function activate(context: vscode.ExtensionContext) {
             void vscode.window.showInformationMessage(result.message);
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
+            await recordError(context, 'backup', error);
             void vscode.window.showErrorMessage(`Backup failed: ${detail}`);
         }
     });
@@ -680,7 +758,28 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showInformationMessage('DeepSeek API key saved securely.');
     });
 
-    const forgetGoogleTokens = vscode.commands.registerCommand('codingAgent.forgetGoogleTokens', async () => {
+    const setGLMApiKey = vscode.commands.registerCommand('codingAgent.setGLMApiKey', async () => {
+        const apiKey = await vscode.window.showInputBox({
+            prompt: 'Enter your GLM (Zhipu AI) API key. It will be stored securely by VS Code.',
+            password: true,
+            ignoreFocusOut: true,
+        });
+
+        if (apiKey === undefined) {
+            return;
+        }
+
+        const trimmedKey = apiKey.trim();
+        if (!trimmedKey) {
+            void vscode.window.showWarningMessage('The API key cannot be empty.');
+            return;
+        }
+
+        await context.secrets.store(GLM_API_KEY_SECRET, trimmedKey);
+        void vscode.window.showInformationMessage('GLM API key saved securely.');
+    });
+
+        const forgetGoogleTokens = vscode.commands.registerCommand('codingAgent.forgetGoogleTokens', async () => {
         await context.globalState.update(GOOGLE_TOKENS_SECRET, undefined);
         await context.globalState.update(GMAIL_TOKENS_SECRET, undefined);
         void vscode.window.showInformationMessage('Calendar and Gmail authorization cleared. The agent will re-open the browser on next use.');
@@ -730,8 +829,94 @@ export function activate(context: vscode.ExtensionContext) {
         await vscode.commands.executeCommand('codingAgent.chat.focus');
     });
 
+
+    // --- Self-healing error log -------------------------------------------------
+    // Records errors during runtime and, at session start, feeds unresolved
+    // entries back into the agent so it can attempt to fix its own errors.
+    const runSelfHeal = async (): Promise<void> => {
+        const unresolved = getUnresolvedErrors(context);
+        if (unresolved.length === 0) return;
+        const folder = detectWorkspaceFolder();
+        if (!folder) return;
+        // Prefer whichever provider already has a stored key.
+        const provider: Provider = context.workspaceState.get<string>(PROVIDER_KEY) === 'glm' ? 'glm' : 'deepseek';
+        const apiKey = context.secrets ? (provider === 'glm'
+            ? await context.secrets.get(GLM_API_KEY_SECRET)
+            : await context.secrets.get(API_KEY_SECRET)) : undefined;
+        if (!apiKey) return;
+
+        const config2 = vscode.workspace.getConfiguration('codingAgent');
+        const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
+        const modelId = config2.get<string>(modelKey, provider === 'glm' ? 'glm-5.3' : 'deepseek-v4-pro');
+        agent.setModel(modelId);
+
+        const prompt = buildRepairPrompt(unresolved);
+        const fingerprints = unresolved.map((entry) => entry.fingerprint);
+        await bumpRepairAttempts(context, fingerprints);
+        try {
+            const searxngBaseUrl = config2.get<string>('searxngBaseUrl', 'http://localhost:8080');
+            const maxToolRounds = config2.get<number>('maxToolRounds', 1000);
+            const response = await agent.provideSuggestions(prompt, apiKey, searxngBaseUrl, [], folder.uri.fsPath, maxToolRounds, provider);
+            // Log the repair result into a dedicated conversation so the user can review it.
+            const conversations = context.workspaceState.get<Conversation[]>('codingAgent.conversations', []);
+            const repairConversation: Conversation = {
+                id: `selfheal-${Date.now()}`,
+                title: 'Self-healing repair log',
+                updatedAt: Date.now(),
+                messages: [
+                    { role: 'user', content: buildRepairPrompt(unresolved).slice(0, 4000) },
+                    { role: 'assistant', content: response.trim() },
+                ],
+            };
+            await context.workspaceState.update('codingAgent.conversations', [repairConversation, ...conversations]);
+        } catch (error) {
+            // The repair itself failed; record it but do not loop.
+            await recordError(context, 'unknown', error);
+        }
+    };
+
+    // Run the self-heal pass shortly after activation, only if unresolved errors exist
+    // and the setting is enabled.
+    void (async () => {
+        const selfHealEnabled = vscode.workspace.getConfiguration('codingAgent').get<boolean>('selfHeal.enabled', true);
+        if (!selfHealEnabled) return;
+        // Small delay lets the workspace settle and any key to be read.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        try {
+            await runSelfHeal();
+        } catch {
+            // Never let the self-heal pass throw at startup.
+        }
+    })();
+
+    const showErrorLog = vscode.commands.registerCommand('codingAgent.showErrorLog', async () => {
+        const summary = summarizeLog(context);
+        const allEntries = getAllErrors(context);
+        const list = formatLogList(allEntries);
+        const message = summary + (list ? '\n\n' + list : '');
+        const choice = await vscode.window.showInformationMessage(
+            message,
+            { modal: true },
+            'Run repair now',
+            'Clear log',
+            'Close',
+        );
+        if (choice === 'Run repair now') {
+            await runSelfHeal();
+            void vscode.window.showInformationMessage('Repair pass finished. See the "Self-healing repair log" conversation for details.');
+        } else if (choice === 'Clear log') {
+            await clearErrorLog(context);
+            void vscode.window.showInformationMessage('Coding Agent error log cleared.');
+        }
+    });
+
+    const runRepair = vscode.commands.registerCommand('codingAgent.runSelfHeal', async () => {
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Coding Agent: repairing errors' }, () => runSelfHeal());
+    });
+
     context.subscriptions.push(
         setApiKey,
+        setGLMApiKey,
         configureGoogleCalendar,
         forgetGoogleTokens,
         askDeepSeek,
@@ -739,6 +924,8 @@ export function activate(context: vscode.ExtensionContext) {
         loginGitHub,
         configureGitIdentity,
         backupNow,
+        showErrorLog,
+        runRepair,
         vscode.workspace.onDidChangeWorkspaceFolders(() => {
             if (config.get<boolean>('promptForGitHubLogin', true)) {
                 void githubStatusBar.refresh();

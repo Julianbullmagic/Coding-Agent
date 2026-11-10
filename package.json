@@ -11,11 +11,14 @@
     "onStartupFinished",
     "onCommand:codingAgent.askDeepSeek",
     "onCommand:codingAgent.setApiKey",
+    "onCommand:codingAgent.setGLMApiKey",
     "onCommand:codingAgent.newConversation",
     "onCommand:codingAgent.loginGitHub",
     "onCommand:codingAgent.backupNow",
     "onCommand:codingAgent.configureGoogleCalendar",
-    "onCommand:codingAgent.forgetGoogleTokens"
+    "onCommand:codingAgent.forgetGoogleTokens",
+    "onCommand:codingAgent.showErrorLog",
+    "onCommand:codingAgent.runSelfHeal"
   ],
   "main": "./out/src/extension.js",
   "scripts": {
@@ -58,6 +61,11 @@
           "default": "deepseek-v4-pro",
           "description": "DeepSeek model used by the extension. The startup check may update this setting."
         },
+        "codingAgent.glmModel": {
+          "type": "string",
+          "default": "glm-5.3",
+          "description": "GLM (Zhipu AI) model used by the extension when the GLM provider is selected."
+        },
         "codingAgent.autoCheckModelUpdates": {
           "type": "boolean",
           "default": true,
@@ -79,6 +87,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show a status-bar indicator for GitHub login state and prompt to sign in when credentials are missing or expired."
+        },
+        "codingAgent.selfHeal.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "At the start of each session, automatically feed previously recorded errors back to the agent so it can attempt to fix its own errors."
         }
       }
     },
@@ -90,6 +103,10 @@
       {
         "command": "codingAgent.setApiKey",
         "title": "Coding Agent: Set DeepSeek API Key"
+      },
+      {
+        "command": "codingAgent.setGLMApiKey",
+        "title": "Coding Agent: Set GLM API Key"
       },
       {
         "command": "codingAgent.newConversation",
@@ -110,6 +127,14 @@
       {
         "command": "codingAgent.forgetGoogleTokens",
         "title": "Coding Agent: Forget Google Tokens"
+      },
+      {
+        "command": "codingAgent.showErrorLog",
+        "title": "Coding Agent: Show Error Log"
+      },
+      {
+        "command": "codingAgent.runSelfHeal",
+        "title": "Coding Agent: Run Self-Heal Repair"
       }
     ]
   },

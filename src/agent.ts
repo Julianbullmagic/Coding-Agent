@@ -6,6 +6,13 @@ import * as path from 'path';
 import { RagConversation, retrieveRelevantContext as retrieveRag } from './rag';
 import type { CalendarToolArgs } from './google-calendar';
 import type { GmailToolArgs } from './gmail';
+import {
+    Provider,
+    resolveProvider,
+    GLM_TOOL_DEFINITIONS,
+    GlmCompletionResponse,
+    GlmToolCall,
+} from './providers';
 
 interface ResponseOutputItem {
     type?: string;
@@ -484,7 +491,7 @@ async function commitAndPush(workspacePath: string, args: Record<string, unknown
     return [commitOutput, pushOutput].filter(Boolean).join('\n');
 }
 
-async function fetchPage(apiKey: string, rawUrl: string): Promise<string> {
+async function fetchPageDeepSeek(apiKey: string, rawUrl: string): Promise<string> {
     if (rawUrl.length > 8192) {
         throw new Error('Page URL is too long.');
     }
@@ -498,6 +505,51 @@ async function fetchPage(apiKey: string, rawUrl: string): Promise<string> {
         apiKey,
     );
     return JSON.stringify({ title: page.title ?? '', content: (page.content ?? '').slice(0, 12000) });
+}
+
+async function fetchPageDirect(rawUrl: string): Promise<string> {
+    if (rawUrl.length > 8192) {
+        throw new Error('Page URL is too long.');
+    }
+    const pageUrl = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(pageUrl.protocol) || pageUrl.username || pageUrl.password) {
+        throw new Error('Only public HTTP(S) URLs without embedded credentials can be fetched.');
+    }
+    const body = await new Promise<string>((resolve, reject) => {
+        const onResponse = (response: http.IncomingMessage) => {
+            const chunks: Buffer[] = [];
+            response.on('data', (chunk: Buffer | string) => {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            });
+            response.on('end', () => {
+                const text = Buffer.concat(chunks).toString('utf8');
+                const status = response.statusCode ?? 0;
+                if (status < 200 || status >= 300) {
+                    reject(new Error(`Page fetch failed: HTTP ${status}`));
+                    return;
+                }
+                const cleaned = text
+                    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                    .replace(/<[^>]+>/g, ' ')
+                    .replace(/&nbsp;/g, ' ')
+                    .replace(/&amp;/g, '&')
+                    .replace(/&lt;/g, '<')
+                    .replace(/&gt;/g, '>')
+                    .replace(/&#39;/g, "'")
+                    .replace(/&quot;/g, '"')
+                    .replace(/\s+/g, ' ');
+                resolve(cleaned.trim());
+            });
+        };
+        const request = pageUrl.protocol === 'https:'
+            ? https.request(pageUrl, { method: 'GET' }, onResponse)
+            : http.request(pageUrl, { method: 'GET' }, onResponse);
+        request.setTimeout(60_000, () => request.destroy(new Error('Page fetch timed out.')));
+        request.on('error', reject);
+        request.end();
+    });
+    return JSON.stringify({ title: '', content: body.slice(0, 12000) });
 }
 
 function getResponseText(response: DeepSeekResponse | null | undefined): string {
@@ -527,6 +579,69 @@ export class CodingAgent {
         return this.modelId;
     }
 
+    // Execute a single named tool and return its result as a JSON-ish string.
+    private async executeTool(name: string, rawArgs: string, workspacePath: string, apiKey: string, provider: Provider): Promise<string> {
+        let args: Record<string, unknown>;
+        try {
+            args = JSON.parse(rawArgs || '{}') as Record<string, unknown>;
+        } catch {
+            args = {};
+        }
+        try {
+            if (name === 'list_files') {
+                return await listWorkspaceFiles(workspacePath, typeof args.path === 'string' ? args.path : '');
+            } else if (name === 'read_file' && typeof args.path === 'string') {
+                return await readWorkspaceFile(workspacePath, args.path);
+            } else if (name === 'write_file' && typeof args.path === 'string' && typeof args.content === 'string') {
+                return await writeWorkspaceFile(workspacePath, args.path, args.content);
+            } else if (name === 'create_directory' && typeof args.path === 'string') {
+                return await createWorkspaceDirectory(workspacePath, args.path);
+            } else if (name === 'search_searxng') {
+                return JSON.stringify({ error: 'SearXNG is disabled.' });
+            } else if (name === 'retrieve_relevant_context' && typeof args.query === 'string') {
+                return await this.retrieveContext(args.query);
+            } else if (name === 'fetch_page' && typeof args.url === 'string') {
+                if (provider === 'glm') {
+                    return await fetchPageDirect(args.url);
+                }
+                return await fetchPageDeepSeek(apiKey, args.url);
+            } else if (name === 'run_command' && typeof args.command === 'string') {
+                const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 120000;
+                return await runShellCommand(workspacePath, args.command, timeoutMs);
+            } else if (name === 'sign_in_to_github') {
+                return await signInToGitHub(workspacePath);
+            } else if (name === 'create_github_repository') {
+                return await createGitHubRepository(workspacePath, args);
+            } else if (name === 'commit_and_push') {
+                return await commitAndPush(workspacePath, args);
+            } else if (name === 'list_calendar_events' || name === 'create_calendar_event' || name === 'update_calendar_event' || name === 'delete_calendar_event') {
+                if (this.calendarHandler) {
+                    return await this.calendarHandler({
+                        action: name === 'list_calendar_events' ? 'list' : name === 'create_calendar_event' ? 'create' : name === 'update_calendar_event' ? 'update' : 'delete',
+                        ...args,
+                    });
+                }
+                return JSON.stringify({ error: 'Google Calendar is not connected in this session.' });
+            } else if (name === 'list_emails' || name === 'search_emails' || name === 'read_email' || name === 'send_email' || name === 'reply_email') {
+                if (this.gmailHandler) {
+                    return await this.gmailHandler({
+                        action: name === 'list_emails' ? 'list' : name === 'search_emails' ? 'search' : name === 'read_email' ? 'read' : name === 'send_email' ? 'send' : 'reply',
+                        ...args,
+                    });
+                }
+                return JSON.stringify({ error: 'Gmail is not connected in this session.' });
+            }
+            return JSON.stringify({ error: 'Invalid or unsupported web-tool arguments.' });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'The web tool failed.';
+            return JSON.stringify({ error: message });
+        }
+    }
+
+    private scopedInstructions(workspacePath: string): string {
+        return SYSTEM_PROMPT + ' The workspace folder you may access is exactly: ' + JSON.stringify(workspacePath) + '. Use list_files, read_file, write_file, and create_directory relative to this folder only. Do not read or modify anything outside it.';
+    }
+
     async provideSuggestions(
         prompt: string,
         apiKey: string,
@@ -534,6 +649,19 @@ export class CodingAgent {
         history: Array<{ role: 'user' | 'assistant'; content: string }> = [],
         workspacePath: string = process.cwd(),
         maxToolRounds: number = 1000,
+        provider: Provider = 'deepseek',
+    ): Promise<string> {
+        return provider === 'glm'
+            ? this.provideGlmSuggestions(prompt, apiKey, history, workspacePath, maxToolRounds)
+            : this.provideDeepSeekSuggestions(prompt, apiKey, history, workspacePath, maxToolRounds);
+    }
+
+    private async provideDeepSeekSuggestions(
+        prompt: string,
+        apiKey: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath: string,
+        maxToolRounds: number,
     ): Promise<string> {
         const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
         let input: string | ResponseOutputItem[] = history.length === 0
@@ -554,12 +682,12 @@ export class CodingAgent {
                 },
             ];
 
-        const scopedInstructions = SYSTEM_PROMPT + ' The workspace folder you may access is exactly: ' + JSON.stringify(workspacePath) + '. Use list_files, read_file, write_file, and create_directory relative to this folder only. Do not read or modify anything outside it.';
+        const instructions = this.scopedInstructions(workspacePath);
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
             const requestBody: string = JSON.stringify({
                 model: this.modelId,
-                instructions: scopedInstructions,
+                instructions,
                 input,
                 reasoning: { effort: 'none' },
                 max_output_tokens: 8192,
@@ -578,7 +706,6 @@ export class CodingAgent {
             const calls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'function_call');
             const webCalls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'web_search_call');
 
-            // Only finalize when there are no pending function calls AND no web search calls.
             if (calls.length === 0 && webCalls.length === 0) {
                 const text = getResponseText(response);
                 if (!text) {
@@ -587,69 +714,16 @@ export class CodingAgent {
                 return text;
             }
             if (round === normalizedMaxToolRounds) {
-                throw new Error('The agent reached the maximum tool-operation limit for this turn. Please retry with a smaller step or send a follow-up message to continue.');
+                throw new Error('The agent reached the maximum tool-operation limit for this turn.');
             }
 
             const prev: ResponseOutputItem[] = typeof input === 'string' ? [{ role: 'user', content: input }] : input;
 
             const toolOutputs: ResponseOutputItem[] = await Promise.all(calls.map(async (call: ResponseOutputItem): Promise<ResponseOutputItem> => {
-                let result: string;
-                try {
-                    const args = JSON.parse(call.arguments ?? '{}') as Record<string, unknown>;
-                    if (call.name === 'list_files') {
-                        result = await listWorkspaceFiles(workspacePath, typeof args.path === 'string' ? args.path : '');
-                    } else if (call.name === 'read_file' && typeof args.path === 'string') {
-                        result = await readWorkspaceFile(workspacePath, args.path);
-                    } else if (call.name === 'write_file' && typeof args.path === 'string' && typeof args.content === 'string') {
-                        result = await writeWorkspaceFile(workspacePath, args.path, args.content);
-                    } else if (call.name === 'create_directory' && typeof args.path === 'string') {
-                        result = await createWorkspaceDirectory(workspacePath, args.path);
-                    } else if (call.name === 'search_searxng') {
-                        result = JSON.stringify({ error: 'SearXNG is disabled; DeepSeek web search is used instead.' });
-                    } else if (call.name === 'retrieve_relevant_context' && typeof args.query === 'string') {
-                        result = await this.retrieveContext(args.query);
-                    } else if (call.name === 'fetch_page' && typeof args.url === 'string') {
-                        result = await fetchPage(apiKey, args.url);
-                    } else if (call.name === 'run_command' && typeof args.command === 'string') {
-                        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 120000;
-                        result = await runShellCommand(workspacePath, args.command, timeoutMs);
-                    } else if (call.name === 'sign_in_to_github') {
-                        result = await signInToGitHub(workspacePath);
-                    } else if (call.name === 'create_github_repository') {
-                        result = await createGitHubRepository(workspacePath, args);
-                    } else if (call.name === 'commit_and_push') {
-                        result = await commitAndPush(workspacePath, args);
-                    } else if (call.name === 'list_calendar_events' || call.name === 'create_calendar_event' || call.name === 'update_calendar_event' || call.name === 'delete_calendar_event') {
-                        if (this.calendarHandler) {
-                            result = await this.calendarHandler({
-                                action: call.name === 'list_calendar_events' ? 'list' : call.name === 'create_calendar_event' ? 'create' : call.name === 'update_calendar_event' ? 'update' : 'delete',
-                                ...args,
-                            });
-                        } else {
-                            result = JSON.stringify({ error: 'Google Calendar is not connected in this session.' });
-                        }
-                    } else if (call.name === 'list_emails' || call.name === 'search_emails' || call.name === 'read_email' || call.name === 'send_email' || call.name === 'reply_email') {
-                        if (this.gmailHandler) {
-                            result = await this.gmailHandler({
-                                action: call.name === 'list_emails' ? 'list' : call.name === 'search_emails' ? 'search' : call.name === 'read_email' ? 'read' : call.name === 'send_email' ? 'send' : 'reply',
-                                ...args,
-                            });
-                        } else {
-                            result = JSON.stringify({ error: 'Gmail is not connected in this session.' });
-                        }
-                    } else {
-                        result = JSON.stringify({ error: 'Invalid or unsupported web-tool arguments.' });
-                    }
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : 'The web tool failed.';
-                    result = JSON.stringify({ error: message });
-                }
+                const result = await this.executeTool(call.name ?? '', call.arguments ?? '{}', workspacePath, apiKey, 'deepseek');
                 return { type: 'function_call_output', call_id: call.call_id ?? '', output: result };
             }));
 
-            // Convert web_search_call items (which carry their results) into
-            // output items that the next round can consume, so the model can
-            // continue reasoning from the search results instead of stopping.
             const webSearchOutputs: ResponseOutputItem[] = webCalls.map((call: ResponseOutputItem): ResponseOutputItem => {
                 const resultsText = (call.results ?? [])
                     .slice(0, 5)
@@ -667,6 +741,69 @@ export class CodingAgent {
         }
 
         throw new Error('DeepSeek did not complete the response.');
+    }
+
+    private async provideGlmSuggestions(
+        prompt: string,
+        apiKey: string,
+        history: Array<{ role: 'user' | 'assistant'; content: string }>,
+        workspacePath: string,
+        maxToolRounds: number,
+    ): Promise<string> {
+        const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
+        const cfg = resolveProvider('glm', this.modelId);
+        const endpoint = new URL(cfg.endpoint);
+
+        type GLMMessage = { role: string; content: string | null; tool_calls?: GlmToolCall[]; tool_call_id?: string };
+
+        const systemMessage: GLMMessage = { role: 'system', content: this.scopedInstructions(workspacePath) };
+        const messages: GLMMessage[] = [
+            systemMessage,
+            ...history.map((message): GLMMessage => ({ role: message.role, content: message.content })),
+            { role: 'user', content: prompt },
+        ];
+
+        for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            const requestBody: string = JSON.stringify({
+                model: cfg.model,
+                messages,
+                max_tokens: 8192,
+                tools: GLM_TOOL_DEFINITIONS,
+                tool_choice: 'auto',
+            });
+            const response = await requestJson<GlmCompletionResponse>(
+                endpoint,
+                requestBody,
+                apiKey,
+            );
+            const choice = response.choices?.[0];
+            const message = choice?.message;
+            if (!message) {
+                throw new Error('GLM returned an empty response.');
+            }
+            const toolCalls = message.tool_calls ?? [];
+            if (toolCalls.length === 0) {
+                const text = (message.content ?? '').trim();
+                if (!text) {
+                    throw new Error('GLM returned an empty response.');
+                }
+                return text;
+            }
+            if (round === normalizedMaxToolRounds) {
+                throw new Error('The agent reached the maximum tool-operation limit for this turn.');
+            }
+
+            messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls });
+
+            for (const toolCall of toolCalls) {
+                const toolName = toolCall.function?.name ?? '';
+                const rawArgs = toolCall.function?.arguments ?? '{}';
+                const result = await this.executeTool(toolName, rawArgs, workspacePath, apiKey, 'glm');
+                messages.push({ role: 'tool', content: result, tool_call_id: toolCall.id });
+            }
+        }
+
+        throw new Error('GLM did not complete the response.');
     }
 
     // Retrieve relevant context from earlier conversations via the RAG module.
