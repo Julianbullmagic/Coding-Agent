@@ -32,7 +32,7 @@ export interface ProviderConfig {
 // account's API key is valid. The mainland China endpoint differs (rather than
 // `open.bigmodel.cn/api/paas/v4/...`), so keep this aligned with the account
 // the user actually holds.
-export const GLM_DEFAULT_MODEL = 'glm-4.6';
+export const GLM_DEFAULT_MODEL = 'glm-5.3';
 
 /**
  * Resolve the provider configuration for a given provider id and model id.
@@ -54,6 +54,10 @@ export function resolveProvider(provider: Provider, modelId?: string): ProviderC
         openAIStyle: false,
     };
 }
+
+// Reasoning effort for GLM 5.x models. GLM-5.3 supports low/high/max (default max).
+// GLM-4.6 ignores this (uses its own automatic thinking toggle).
+export const GLM_REASONING_EFFORT = 'high' as const;
 
 export const GLM_MODEL_KEY = 'codingAgent.glmModel';
 export const GLM_API_KEY_SECRET = 'codingAgent.glmApiKey';

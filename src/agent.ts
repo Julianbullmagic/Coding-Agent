@@ -13,6 +13,7 @@ import {
     GlmCompletionResponse,
     GlmToolCall,
     extractGlmText,
+    GLM_REASONING_EFFORT,
 } from './providers';
 
 interface ResponseOutputItem {
@@ -769,6 +770,7 @@ export class CodingAgent {
                 model: cfg.model,
                 messages,
                 max_tokens: 8192,
+                reasoning_effort: GLM_REASONING_EFFORT,
                 tools: GLM_TOOL_DEFINITIONS,
                 tool_choice: 'auto',
             });
