@@ -1,15 +1,1 @@
-Fix GLM error misclassification: classify "model names" errors as glm-request not model-check
-
-The self-heal pass kept re-queuing the "supported API model names ... but you
-passed glm-5.3" error because classifySource checked "model" before "glm", so
-the entry was recorded as model-check. resolveSource("glm-request") after a
-successful GLM request could never mark it resolved.
-
-- Move classifySource into src/self-heal.ts (exported, vscode-free, testable)
-- Check GLM/zhipu/bigmodel first; run precise model-check string matches
-  (model check request failed/timed out, unreadable model list) before the
-  generic "deepseek" check
-- Add 5 regression tests covering the exact recorded error message
-- Bump to 0.3.6, repackage and reinstall VSIX
-
-109 tests passing.
+chore: remove one-off patch scripts from 0.3.6 self-heal fix
