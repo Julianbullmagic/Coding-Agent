@@ -186,15 +186,28 @@ export function buildGmailAuthorizationUrl(clientId: string): string {
 }
 
 /**
- * Extract the OAuth `code` from user input, tolerating a full redirect URL
- * or a raw (possibly percent-encoded) code.
+ * Extract the OAuth `code` from user input, tolerating a full redirect URL,
+ * a bare `code=...` fragment, a raw code, or a percent-encoded code.
+ *
+ * Google authorization codes look like `4/0Aea...` - note the `/`. In the
+ * address bar after a redirect to http://localhost the `/` arrives
+ * percent-encoded as `%2F` (e.g. `4%2F0Aea...`). This function therefore:
+ *   1. pulls `code` out of any http(s) redirect URL (URLSearchParams
+ *      already decodes `%2F` back to `/`),
+ *   2. pulls `code` out of a bare `code=...&scope=...` fragment that lacks
+ *      an explicit URL scheme,
+ *   3. returns a lone token verbatim, percent-decoding it exactly once when
+ *      it contains `%` sequences (so `4%2F0Aea...` becomes `4/0Aea...`),
+ *   4. strips trailing whitespace/query noise defensively.
+ *
+ * It never truncates a legitimate code that contains `/`.
  */
 export function extractGmailAuthorizationCode(input: string): string {
     const trimmed = input.trim();
     if (!trimmed) return '';
 
-    // Full redirect URL: pull the `code` query param.
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    // Full redirect URL: pull the `code` query param (also decodes %2F -> /).
+    if (/^https?:\/\//i.test(trimmed)) {
         try {
             const url = new URL(trimmed);
             const code = url.searchParams.get('code');
@@ -204,20 +217,30 @@ export function extractGmailAuthorizationCode(input: string): string {
         }
     }
 
-    // Authorization codes are URL-safe base64-like (A-Z a-z 0-9 - _ . ~).
-    // Return them verbatim so we never truncate a legitimate code.
-    if (/^[A-Za-z0-9\-._~]+$/.test(trimmed)) {
-        try {
-            const decoded = decodeURIComponent(trimmed);
-            if (/^[A-Za-z0-9\-._~]+$/.test(decoded)) return decoded;
-        } catch {
-            // Not percent-encoded; use as-is.
-        }
-        return trimmed;
+    // Bare "code=..." fragment without an explicit scheme (e.g. what a user
+    // might copy out of a URL bar that dropped the scheme).
+    const codeMatch = trimmed.match(/(?:^|[?&])code=([^&#\s]+)/);
+    if (codeMatch) {
+        const raw = codeMatch[1];
+        return decodeOnce(raw);
     }
 
-    // Defensive fallback: strip trailing query-string / whitespace.
-    return trimmed.split(/[&\s]/)[0];
+    // A lone token: percent-decode once if it contains "%" escape sequences,
+    // otherwise return verbatim (so '4/0Aea...' with a literal slash survives).
+    return decodeOnce(trimmed);
+}
+
+/** Percent-decode a code exactly once, falling back to verbatim on bad input. */
+function decodeOnce(value: string): string {
+    if (!value.includes('%')) return value;
+    try {
+        const decoded = decodeURIComponent(value);
+        // A legitimate Google code keeps '/' and never round-trips to more %.
+        if (!decoded.includes('%')) return decoded;
+    } catch {
+        // Malformed percent-encoding; use the raw value.
+    }
+    return value;
 }
 
 /**

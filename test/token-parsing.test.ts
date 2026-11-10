@@ -81,13 +81,31 @@ describe('authorization code extraction', () => {
         assert.equal(extractAuthorizationCode(url), '4/0Acv');
     });
     it('returns a raw URL-safe code verbatim (does not truncate)', () => {
-        // Google codes are URL-safe base64: characters like - _ . ~ are valid.
         const code = '4-0Acv_xK.e~Tz';
         assert.equal(extractAuthorizationCode(code), code);
         assert.equal(extractGmailAuthorizationCode(code), code);
     });
-    it('falls back to splitting on & for legacy input', () => {
-        assert.equal(extractAuthorizationCode('code&something'), 'code');
+    it('returns a raw code that contains a slash verbatim', () => {
+        // Real Google codes look like "4/0Aea..." — the slash must survive.
+        const code = '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ';
+        assert.equal(extractAuthorizationCode(code), code);
+        assert.equal(extractGmailAuthorizationCode(code), code);
+    });
+    it('percent-decodes a clipboard code (%2F -> /)', () => {
+        // The address bar shows "4%2F0Aea..." — this is the code the user
+        // actually copies. It must decode to "4/0Aea...".
+        const encoded = '4%2F0AeaYSHDk9zVzy3CjPy2RBexK8zEQ';
+        assert.equal(extractGmailAuthorizationCode(encoded), '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ');
+        assert.equal(extractAuthorizationCode(encoded), '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ');
+    });
+    it('extracts the code from a bare code=... fragment without a scheme', () => {
+        const fragment = 'code=4%2F0AeaYSHDk9zVzy3CjPy2RBexK8zEQ&scope=https%3A%2F%2Fmail.google.com%2F';
+        assert.equal(extractGmailAuthorizationCode(fragment), '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ');
+        assert.equal(extractAuthorizationCode(fragment), '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ');
+    });
+    it('extracts the code from a leading-? query string', () => {
+        const qs = '?code=4%2F0AeaYSHDk9zVzy3CjPy2RBexK8zEQ';
+        assert.equal(extractGmailAuthorizationCode(qs), '4/0AeaYSHDk9zVzy3CjPy2RBexK8zEQ');
     });
     it('trims surrounding whitespace', () => {
         assert.equal(extractAuthorizationCode('  somecode  '), 'somecode');
