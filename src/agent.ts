@@ -14,6 +14,7 @@ import {
     GlmToolCall,
     extractGlmText,
     GLM_REASONING_EFFORT,
+    glmSupportsReasoningEffort,
 } from './providers';
 
 interface ResponseOutputItem {
@@ -766,14 +767,17 @@ export class CodingAgent {
         ];
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
-            const requestBody: string = JSON.stringify({
+            const glmBody: Record<string, unknown> = {
                 model: cfg.model,
                 messages,
                 max_tokens: 8192,
-                reasoning_effort: GLM_REASONING_EFFORT,
                 tools: GLM_TOOL_DEFINITIONS,
                 tool_choice: 'auto',
-            });
+            };
+            if (glmSupportsReasoningEffort(cfg.model)) {
+                glmBody.reasoning_effort = GLM_REASONING_EFFORT;
+            }
+            const requestBody: string = JSON.stringify(glmBody);
             const response = await requestJson<GlmCompletionResponse>(
                 endpoint,
                 requestBody,

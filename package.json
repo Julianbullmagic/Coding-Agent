@@ -63,7 +63,7 @@
         },
         "codingAgent.glmModel": {
           "type": "string",
-          "default": "glm-5.3",
+          "default": "glm-4.6",
           "description": "GLM (Z.AI / Zhipu AI) model used by the extension when the GLM provider is selected."
         },
         "codingAgent.autoCheckModelUpdates": {

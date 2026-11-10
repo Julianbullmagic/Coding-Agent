@@ -7,8 +7,8 @@
  * that uses the standard `tools` / `tool_calls` format.
  *
  * GLM is routed to the international Z.AI endpoint (`https://api.z.ai`),
- * which serves the glm-4.x model family. The mainland China endpoint
- * (`https://open.bigmodel.cn`) uses a different model id space.
+ * which serves the glm-4.x / glm-5.x model families. The mainland China
+ * endpoint (`https://open.bigmodel.cn`) uses a different model id space.
  *
  * Rather than forcing both providers through a single request shape, this
  * module exposes small helpers that the agent uses to (a) pick the right
@@ -32,7 +32,61 @@ export interface ProviderConfig {
 // account's API key is valid. The mainland China endpoint differs (rather than
 // `open.bigmodel.cn/api/paas/v4/...`), so keep this aligned with the account
 // the user actually holds.
-export const GLM_DEFAULT_MODEL = 'glm-5.3';
+export const GLM_API_ENDPOINT = 'https://api.z.ai/api/paas/v4/chat/completions';
+
+// The default GLM model for the z.ai international platform.
+//
+// NOTE: z.ai serves the GLM model family under ids such as `glm-4.5`,
+// `glm-4.6`, `glm-4.7`, `glm-5`, `glm-5.1`, `glm-5.2`, and their `flash`
+// variants. There is no `glm-5.3` id on z.ai; the flagship 5.x models are
+// simply named `glm-5`, `glm-5.1`, etc. `glm-4.6` is a reliable general
+// purpose default that works without a coding-plan subscription.
+export const GLM_DEFAULT_MODEL = 'glm-4.6';
+
+// Reasoning effort for GLM 5.x reasoning models (low/medium/high/max).
+// `glm-4.6` and other non-reasoning models ignore or reject this field, so
+// it is only attached when the selected model is a reasoning variant.
+export const GLM_REASONING_EFFORT = 'medium' as const;
+
+// Models that support the `reasoning_effort` request field on z.ai.
+const GLM_REASONING_MODELS: ReadonlySet<string> = new Set(['glm-5', 'glm-5.1', 'glm-5.2']);
+
+/**
+ * Normalize a user-supplied GLM model id into a value that z.ai actually
+ * accepts. This handles a few real-world problems:
+ *
+ *  - Tentative/pinned ids that never existed on z.ai (e.g. `glm-5.3`).
+ *  - Whitespace/casing from a hand-edited setting.
+ *
+ * If the id is not recognized at all, fall back to the given default so the
+ * request does not hard-fail on a typo.
+ */
+export function normalizeGlmModel(modelId: string | undefined, fallback: string = GLM_DEFAULT_MODEL): string {
+    const id = (modelId ?? '').trim().toLowerCase();
+    if (!id) return fallback;
+
+    // A valid glm-<major>.<minor>[-<variant>] token. z.ai ids are only ever
+    // `glm-<major>[.<minor>]` plus an optional `-flash`/`-air`/`-turbo`/`-v`
+    // suffix. Anything outside this shape is treated as a typo and replaced.
+    const match = /^glm-(\d+)(?:\.(\d+))?(-[a-z0-9]+)?$/.exec(id);
+    if (!match) return fallback;
+
+    const major = Number(match[1]);
+    const minorRaw = match[2] ?? '';
+    const variant = match[3] ?? '';
+
+    // The 5.x flagship reasoning models on z.ai are named `glm-5`, `glm-5.1`,
+    // `glm-5.2`, etc. There is no `glm-5.3`. Remap any invented 5.x minor
+    // (5.3 and beyond) down to the known flagship `glm-5` so a stale setting
+    // doesn't hard-fail.
+    if (major >= 5 && minorRaw && Number(minorRaw) >= 3) {
+        return 'glm-5' + variant;
+    }
+
+    // Everything else is returned normalized to lowercase (e.g. `glm-4.6`,
+    // `glm-4.7-flash`).
+    return 'glm-' + major + (minorRaw ? '.' + minorRaw : '') + variant;
+}
 
 /**
  * Resolve the provider configuration for a given provider id and model id.
@@ -42,9 +96,10 @@ export const GLM_DEFAULT_MODEL = 'glm-5.3';
  */
 export function resolveProvider(provider: Provider, modelId?: string): ProviderConfig {
     if (provider === 'glm') {
+        const model = normalizeGlmModel(modelId);
         return {
-            endpoint: 'https://api.z.ai/api/paas/v4/chat/completions',
-            model: (modelId && modelId.trim()) || GLM_DEFAULT_MODEL,
+            endpoint: GLM_API_ENDPOINT,
+            model,
             openAIStyle: true,
         };
     }
@@ -55,9 +110,12 @@ export function resolveProvider(provider: Provider, modelId?: string): ProviderC
     };
 }
 
-// Reasoning effort for GLM 5.x models. GLM-5.3 supports low/high/max (default max).
-// GLM-4.6 ignores this (uses its own automatic thinking toggle).
-export const GLM_REASONING_EFFORT = 'high' as const;
+/**
+ * True when the given GLM model supports the `reasoning_effort` request field.
+ */
+export function glmSupportsReasoningEffort(modelId: string): boolean {
+    return GLM_REASONING_MODELS.has(modelId.trim().toLowerCase());
+}
 
 export const GLM_MODEL_KEY = 'codingAgent.glmModel';
 export const GLM_API_KEY_SECRET = 'codingAgent.glmApiKey';
