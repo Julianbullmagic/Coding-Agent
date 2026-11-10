@@ -1,35 +1,29 @@
 #!/usr/bin/env node
 
 /**
- * Google Business Profile - Auto Reply to Unanswered Reviews
- * 
- * Standalone script that:
- * 1. Lists your Google Business reviews
- * 2. Identifies unanswered ones
- * 3. Drafts short grateful replies
- * 4. Asks for confirmation before posting each
+ * Google Business Profile — List & Auto-Reply to Unanswered Reviews
  * 
  * Usage:
  *   node scripts/business-reviews-auto-reply.mjs
  * 
- * Requires environment variables:
- *   GOOGLE_CLIENT_ID     - Your OAuth Client ID
- *   GOOGLE_CLIENT_SECRET - Your OAuth Client Secret
+ * First run: prompts for Client ID/Secret, then opens browser for OAuth.
+ * Tokens saved to ~/.google-business-tokens.json for reuse.
  * 
- * Or pass them as arguments:
- *   node scripts/business-reviews-auto-reply.mjs CLIENT_ID CLIENT_SECRET
- * 
- * First run will open a browser for OAuth authorization.
- * Tokens are saved to ~/.google-business-tokens.json for reuse.
+ * Flow:
+ *   1. Authenticate with business.manage scope
+ *   2. Find your business location
+ *   3. List up to 50 most recent reviews
+ *   4. Draft grateful replies for unanswered ones
+ *   5. Ask for confirmation before posting
  */
 
 import https from 'https';
 import http from 'http';
-import { open } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import readline from 'readline';
+import { exec } from 'child_process';
 
 // ─── Config ──────────────────────────────────────────────────────────
 const BUSINESS_SCOPE = 'https://www.googleapis.com/auth/business.manage';
@@ -38,7 +32,8 @@ const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const BUSINESS_INFO_BASE = 'https://mybusinessbusinessinformation.googleapis.com/v1';
 const MYBUSINESS_BASE = 'https://mybusiness.googleapis.com/v4';
 const TOKEN_FILE = path.join(os.homedir(), '.google-business-tokens.json');
-const LOCAL_PORT = 9876; // Local redirect port for easier auth
+const CREDS_FILE = path.join(os.homedir(), '.google-oauth-creds.json');
+const LOCAL_PORT = 9876;
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -78,14 +73,21 @@ function httpsRequest(url, method, body, headers = {}) {
 }
 
 function loadTokens() {
-    try {
-        return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
-    } catch { return null; }
+    try { return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); } catch { return null; }
 }
 
 function saveTokens(tokens) {
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2), 'utf8');
     console.log(`  💾 Tokens saved to ${TOKEN_FILE}`);
+}
+
+function loadCreds() {
+    try { return JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8')); } catch { return null; }
+}
+
+function saveCreds(clientId, clientSecret) {
+    fs.writeFileSync(CREDS_FILE, JSON.stringify({ clientId, clientSecret }, null, 2), 'utf8');
+    console.log(`  💾 Credentials saved to ${CREDS_FILE}`);
 }
 
 async function refreshAccessToken(clientId, clientSecret, refreshToken) {
@@ -108,7 +110,6 @@ function isExpired(tokens) {
 // ─── OAuth with local redirect ───────────────────────────────────────
 async function authorize(clientId, clientSecret) {
     const redirectUri = `http://localhost:${LOCAL_PORT}`;
-    
     const params = new URLSearchParams({
         client_id: clientId, redirect_uri: redirectUri,
         response_type: 'code', scope: BUSINESS_SCOPE,
@@ -119,11 +120,9 @@ async function authorize(clientId, clientSecret) {
     console.log('\n🔑 Opening browser for Google Business Profile authorization...');
     console.log(`   If the browser doesn't open, visit this URL:\n   ${authUrl}\n`);
     
-    // Try to open browser
     const cmd = process.platform === 'win32' ? 'start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-    try { require('child_process').exec(`${cmd} "${authUrl}"`); } catch {}
+    try { exec(`${cmd} "${authUrl}"`); } catch {}
     
-    // Start local server to catch the redirect
     const code = await new Promise((resolve, reject) => {
         const server = http.createServer((req, res) => {
             const url = new URL(req.url, redirectUri);
@@ -144,7 +143,6 @@ async function authorize(clientId, clientSecret) {
         server.setTimeout(120000);
     });
     
-    // Exchange code for tokens
     console.log('  🔄 Exchanging authorization code for tokens...');
     const body = new URLSearchParams({
         code, client_id: clientId, client_secret: clientSecret,
@@ -160,12 +158,21 @@ async function authorize(clientId, clientSecret) {
 
 // ─── Business Profile API calls ─────────────────────────────────────
 async function findFirstLocation(accessToken) {
-    const params = new URLSearchParams({ readMask: 'name,title', pageSize: '1' });
+    const params = new URLSearchParams({ readMask: 'name,title', pageSize: '10' });
     const url = `${BUSINESS_INFO_BASE}/accounts/-/locations?${params.toString()}`;
     const result = await httpsRequest(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
-    const first = (result.locations ?? [])[0];
-    if (!first) return null;
-    return { name: first.name, title: first.title };
+    const locations = result.locations ?? [];
+    if (locations.length === 0) return null;
+    if (locations.length > 1) {
+        console.log('\n  📍 Multiple locations found:');
+        for (let i = 0; i < locations.length; i++) {
+            console.log(`    ${i + 1}. ${locations[i].title} (${locations[i].name})`);
+        }
+        const choice = await ask('  Choose location (1-' + locations.length + '): ');
+        const idx = Math.max(0, Math.min(locations.length - 1, parseInt(choice) - 1 || 0));
+        return locations[idx];
+    }
+    return locations[0];
 }
 
 async function listAllReviews(accessToken, location, pageSize = 50) {
@@ -226,26 +233,43 @@ function draftReply(review) {
 // ─── Main ────────────────────────────────────────────────────────────
 async function main() {
     console.log('\n🎩 Google Business Profile — Auto Reply to Unanswered Reviews\n');
+    console.log('══════════════════════════════════════════════════════════════\n');
     
-    // Get credentials
+    // Get credentials — try saved file, env vars, then prompt
     let clientId = process.env.GOOGLE_CLIENT_ID || process.argv[2];
     let clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.argv[3];
     
     if (!clientId || !clientSecret) {
-        console.log('⚠️  No credentials provided.\n');
-        clientId = await ask('Enter your Google OAuth Client ID: ');
-        clientSecret = await ask('Enter your Google OAuth Client Secret: ');
+        const saved = loadCreds();
+        if (saved?.clientId && saved?.clientSecret) {
+            clientId = saved.clientId;
+            clientSecret = saved.clientSecret;
+            console.log('  ✅ Using saved credentials from', CREDS_FILE);
+        }
+    }
+    
+    if (!clientId || !clientSecret) {
+        console.log('⚠️  No credentials found.\n');
+        console.log('  These are the same Google OAuth Client ID and Secret you configured');
+        console.log('  in the Coding Agent extension (Configure Google Calendar command).\n');
+        clientId = await ask('  Enter your Google OAuth Client ID: ');
+        clientSecret = await ask('  Enter your Google OAuth Client Secret: ');
+        
+        if (clientId && clientSecret) {
+            saveCreds(clientId, clientSecret);
+        }
     }
     
     if (!clientId || !clientSecret) {
         console.error('❌ Client ID and Secret are required.');
+        rl.close();
         process.exit(1);
     }
     
     // Get or authorize tokens
     let tokens = loadTokens();
     if (!tokens || !tokens.access_token) {
-        console.log('  📱 No saved tokens found. Starting authorization...');
+        console.log('  📱 No saved Business Profile tokens found. Starting authorization...');
         tokens = await authorize(clientId, clientSecret);
     } else if (isExpired(tokens)) {
         try {
@@ -255,7 +279,7 @@ async function main() {
             tokens = await authorize(clientId, clientSecret);
         }
     } else {
-        console.log('  ✅ Using saved tokens.');
+        console.log('  ✅ Using saved Business Profile tokens.');
     }
     
     // Find business location
@@ -270,27 +294,30 @@ async function main() {
         console.log('  2. The "My Business Account Management API" is not enabled');
         console.log('  3. You don\'t have a verified Google Business Profile');
         console.log('\n  Enable APIs at: https://console.cloud.google.com/apis/library');
+        rl.close();
         process.exit(1);
     }
     
     if (!location) {
         console.error('❌ No Google Business Profile location found.');
         console.log('   Make sure you have a verified business at https://business.google.com');
+        rl.close();
         process.exit(1);
     }
     console.log(`  📍 Found: ${location.title} (${location.name})`);
     
     // List reviews
-    console.log('\n📋 Fetching reviews...');
+    console.log('\n📋 Fetching up to 50 most recent reviews...');
     let reviews;
     try {
         reviews = await listAllReviews(tokens.access_token, location.name, 50);
     } catch (e) {
         console.error(`❌ Error fetching reviews: ${e.message}`);
         console.log('\n  This likely means:');
-        console.log('  1. The "Business Profile API" (v4 reviews) is not enabled');
+        console.log('  1. The Business Profile API (v4 reviews) is not enabled');
         console.log('  2. The "My Business Account Management API" is not enabled');
         console.log('\n  Enable APIs at: https://console.cloud.google.com/apis/library');
+        rl.close();
         process.exit(1);
     }
     
@@ -307,27 +334,28 @@ async function main() {
     console.log(`  ✅ Already answered: ${answered.length}`);
     console.log(`  ⏳ Unanswered: ${unanswered.length}`);
     
+    // Display ALL reviews
+    console.log('\n' + '─'.repeat(60));
+    console.log('ALL REVIEWS:\n');
+    for (const r of reviews) {
+        const stars = '⭐'.repeat(r.rating) + '☆'.repeat(5 - r.rating);
+        const date = r.createTime ? new Date(r.createTime).toLocaleDateString() : 'Unknown date';
+        const status = r.hasReply ? '✅ replied' : '⏳ no reply';
+        console.log(`  ${stars}  by ${r.reviewer}  (${date})  [${status}]`);
+        if (r.comment) console.log(`    "${r.comment.slice(0, 200)}${r.comment.length > 200 ? '...' : ''}"`);
+        if (r.reply) console.log(`    Reply: "${r.reply.slice(0, 150)}${r.reply.length > 150 ? '...' : ''}"`);
+        console.log();
+    }
+    
     if (unanswered.length === 0) {
         console.log('\n  🎉 All reviews already have replies! Nothing to do.');
         rl.close();
         return;
     }
     
-    // Display all reviews
-    console.log('\n' + '─'.repeat(60));
-    console.log('UNANSWERED REVIEWS:\n');
-    for (const r of unanswered) {
-        const stars = '⭐'.repeat(r.rating) + '☆'.repeat(5 - r.rating);
-        const date = r.createTime ? new Date(r.createTime).toLocaleDateString() : 'Unknown date';
-        console.log(`  ${stars}  by ${r.reviewer}  (${date})`);
-        console.log(`  "${r.comment || '(no comment)'}"`);
-        console.log(`  Review: ${r.name}`);
-        console.log();
-    }
-    
     // Draft and confirm replies
     console.log('─'.repeat(60));
-    console.log('DRAFTED REPLIES:\n');
+    console.log('DRAFTED REPLIES FOR UNANSWERED REVIEWS:\n');
     
     const toPost = [];
     for (const r of unanswered) {

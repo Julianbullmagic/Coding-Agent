@@ -2,7 +2,7 @@
     "name": "coding-agent-extension",
     "displayName": "Coding Agent Extension",
     "description": "A DeepSeek coding assistant with web search and GitHub backup.",
-    "version": "0.3.7",
+    "version": "0.3.8",
     "publisher": "your-name",
     "engines": {
         "vscode": "^1.90.0"
@@ -18,7 +18,8 @@
         "onCommand:codingAgent.configureGoogleCalendar",
         "onCommand:codingAgent.forgetGoogleTokens",
         "onCommand:codingAgent.showErrorLog",
-        "onCommand:codingAgent.runSelfHeal"
+        "onCommand:codingAgent.runSelfHeal",
+        "onCommand:codingAgent.autoReplyBusinessReviews"
     ],
     "main": "./out/src/extension.js",
     "scripts": {
@@ -135,6 +136,10 @@
             {
                 "command": "codingAgent.runSelfHeal",
                 "title": "Coding Agent: Run Self-Heal Repair"
+            },
+            {
+                "command": "codingAgent.autoReplyBusinessReviews",
+                "title": "Coding Agent: Auto-Reply Google Business Reviews"
             }
         ]
     },
