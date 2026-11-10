@@ -12,6 +12,7 @@ import {
     GLM_TOOL_DEFINITIONS,
     GlmCompletionResponse,
     GlmToolCall,
+    extractGlmText,
 } from './providers';
 
 interface ResponseOutputItem {
@@ -783,7 +784,7 @@ export class CodingAgent {
             }
             const toolCalls = message.tool_calls ?? [];
             if (toolCalls.length === 0) {
-                const text = (message.content ?? '').trim();
+                const text = extractGlmText(message);
                 if (!text) {
                     throw new Error('GLM returned an empty response.');
                 }

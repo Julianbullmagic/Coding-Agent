@@ -1,10 +1,14 @@
 /**
- * Provider abstraction for DeepSeek and GLM (Zhipu AI / ChatGLM).
+ * Provider abstraction for DeepSeek and GLM (Zhipu AI / Z.AI).
  *
  * DeepSeek uses the "Responses API" (`/responses`) with `function_call`
- * items, web-search items, and `instructions`. GLM (Zhipu AI / bigmodel.cn)
+ * items, web-search items, and `instructions`. GLM (Zhipu AI / Z.AI)
  * exposes an OpenAI-compatible Chat Completions API (`/chat/completions`)
  * that uses the standard `tools` / `tool_calls` format.
+ *
+ * GLM is routed to the international Z.AI endpoint (`https://api.z.ai`),
+ * which serves the glm-4.x model family. The mainland China endpoint
+ * (`https://open.bigmodel.cn`) uses a different model id space.
  *
  * Rather than forcing both providers through a single request shape, this
  * module exposes small helpers that the agent uses to (a) pick the right
@@ -18,13 +22,17 @@ export type Provider = 'deepseek' | 'glm';
 export interface ProviderConfig {
     /** Endpoint the agent should POST chat requests to. */
     endpoint: string;
-    /** Model id to send in the request body (e.g. `deepseek-v4-pro` or `glm-5.3`). */
+    /** Model id to send in the request body (e.g. `deepseek-v4-pro` or `glm-4.6`). */
     model: string;
     /** True when the provider uses the Chat Completions (OpenAI) format. */
     openAIStyle: boolean;
 }
 
-const GLM_DEFAULT_MODEL = 'glm-5.3';
+// The international Z.AI endpoint. This is where a z.ai / Zhipu international
+// account's API key is valid. The mainland China endpoint differs (rather than
+// `open.bigmodel.cn/api/paas/v4/...`), so keep this aligned with the account
+// the user actually holds.
+export const GLM_DEFAULT_MODEL = 'glm-4.6';
 
 /**
  * Resolve the provider configuration for a given provider id and model id.
@@ -35,7 +43,7 @@ const GLM_DEFAULT_MODEL = 'glm-5.3';
 export function resolveProvider(provider: Provider, modelId?: string): ProviderConfig {
     if (provider === 'glm') {
         return {
-            endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+            endpoint: 'https://api.z.ai/api/paas/v4/chat/completions',
             model: (modelId && modelId.trim()) || GLM_DEFAULT_MODEL,
             openAIStyle: true,
         };
@@ -70,10 +78,23 @@ export interface GlmCompletionResponse {
     choices?: Array<{
         message?: {
             content?: string | null;
+            // GLM reasoning models can return the final answer in this field
+            // instead of `content` (especially when `reasoning_effort` is set).
+            reasoning_content?: string | null;
             tool_calls?: GlmToolCall[];
         };
     }>;
     error?: { message?: string };
+}
+
+/**
+ * Extract the visible text from a GLM choice message, accounting for the fact
+ * that reasoning models may put the answer in `reasoning_content` rather than
+ * `content`.
+ */
+export function extractGlmText(message: { content?: string | null; reasoning_content?: string | null } | undefined): string {
+    if (!message) return '';
+    return ((message.content ?? '') || (message.reasoning_content ?? '')).trim();
 }
 
 /**

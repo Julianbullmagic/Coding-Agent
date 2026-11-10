@@ -9,7 +9,7 @@ import { ensureRepoOnOpen } from './repo-bootstrap';
 import { detectWorkspaceFolder } from './path-detection';
 import { RagConversation, retrieveRelevantContext, shouldRetrieve, formatRetrievedContext } from './rag';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
-import { GLM_API_KEY_SECRET, PROVIDER_KEY, GLM_MODEL_KEY, Provider } from './providers';
+import { GLM_API_KEY_SECRET, PROVIDER_KEY, GLM_MODEL_KEY, GLM_DEFAULT_MODEL, Provider } from './providers';
 import {
     GOOGLE_CLIENT_ID_SECRET,
     GOOGLE_CLIENT_SECRET_SECRET,
@@ -341,7 +341,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             const model = vscode.workspace.getConfiguration('codingAgent').get<string>(DEEPSEEK_MODEL_KEY, 'deepseek-v4-pro');
             this.agent.setModel(model);
         } else {
-            const model = vscode.workspace.getConfiguration('codingAgent').get<string>(GLM_MODEL_KEY, 'glm-5.3');
+            const model = vscode.workspace.getConfiguration('codingAgent').get<string>(GLM_MODEL_KEY, GLM_DEFAULT_MODEL);
             this.agent.setModel(model);
         }
     }
@@ -417,7 +417,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
 
         const provider = this.currentProvider();
         const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
-        const modelId = vscode.workspace.getConfiguration('codingAgent').get<string>(modelKey, provider === 'glm' ? 'glm-5.3' : 'deepseek-v4-pro');
+        const modelId = vscode.workspace.getConfiguration('codingAgent').get<string>(modelKey, provider === 'glm' ? GLM_DEFAULT_MODEL : 'deepseek-v4-pro');
         this.agent.setModel(modelId);
 
         const apiKey = provider === 'glm'
@@ -847,7 +847,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const config2 = vscode.workspace.getConfiguration('codingAgent');
         const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
-        const modelId = config2.get<string>(modelKey, provider === 'glm' ? 'glm-5.3' : 'deepseek-v4-pro');
+        const modelId = config2.get<string>(modelKey, provider === 'glm' ? GLM_DEFAULT_MODEL : 'deepseek-v4-pro');
         agent.setModel(modelId);
 
         const prompt = buildRepairPrompt(unresolved);
