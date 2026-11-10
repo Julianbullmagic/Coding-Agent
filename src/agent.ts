@@ -15,6 +15,7 @@ import {
     extractGlmText,
     GLM_REASONING_EFFORT,
     glmSupportsReasoningEffort,
+    GLM_DEFAULT_MODEL,
 } from './providers';
 
 interface ResponseOutputItem {
@@ -566,20 +567,30 @@ function getResponseText(response: DeepSeekResponse | null | undefined): string 
 }
 
 export class CodingAgent {
+    private deepseekModelId: string;
+    private glmModelId: string;
+
     constructor(
-        private modelId: string = 'deepseek-v4-pro',
+        deepseekModelId: string = 'deepseek-v4-pro',
         private conversationStore?: () => RagConversation[],
         private activeConversationId?: () => string | undefined,
         private calendarHandler?: (args: Record<string, unknown>) => Promise<string>,
         private gmailHandler?: (args: Record<string, unknown>) => Promise<string>,
-    ) {}
-
-    setModel(modelId: string): void {
-        this.modelId = modelId;
+    ) {
+        this.deepseekModelId = (deepseekModelId && deepseekModelId.trim()) || 'deepseek-v4-pro';
+        this.glmModelId = GLM_DEFAULT_MODEL;
     }
 
-    getModel(): string {
-        return this.modelId;
+    setModel(modelId: string, provider: Provider = 'deepseek'): void {
+        if (provider === 'glm') {
+            this.glmModelId = (modelId && modelId.trim()) || GLM_DEFAULT_MODEL;
+        } else {
+            this.deepseekModelId = (modelId && modelId.trim()) || 'deepseek-v4-pro';
+        }
+    }
+
+    getModel(provider: Provider = 'deepseek'): string {
+        return provider === 'glm' ? this.glmModelId : this.deepseekModelId;
     }
 
     // Execute a single named tool and return its result as a JSON-ish string.
@@ -686,10 +697,11 @@ export class CodingAgent {
             ];
 
         const instructions = this.scopedInstructions(workspacePath);
+        const model = resolveProvider('deepseek', this.deepseekModelId).model;
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
             const requestBody: string = JSON.stringify({
-                model: this.modelId,
+                model,
                 instructions,
                 input,
                 reasoning: { effort: 'none' },
@@ -754,7 +766,7 @@ export class CodingAgent {
         maxToolRounds: number,
     ): Promise<string> {
         const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
-        const cfg = resolveProvider('glm', this.modelId);
+        const cfg = resolveProvider('glm', this.glmModelId);
         const endpoint = new URL(cfg.endpoint);
 
         type GLMMessage = { role: string; content: string | null; tool_calls?: GlmToolCall[]; tool_call_id?: string };

@@ -339,10 +339,10 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         await this.context.workspaceState.update(PROVIDER_KEY, normalized);
         if (normalized === 'deepseek') {
             const model = vscode.workspace.getConfiguration('codingAgent').get<string>(DEEPSEEK_MODEL_KEY, 'deepseek-v4-pro');
-            this.agent.setModel(model);
+            this.agent.setModel(model, 'deepseek');
         } else {
             const model = vscode.workspace.getConfiguration('codingAgent').get<string>(GLM_MODEL_KEY, GLM_DEFAULT_MODEL);
-            this.agent.setModel(model);
+            this.agent.setModel(model, 'glm');
         }
     }
 
@@ -410,7 +410,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             );
             const config = vscode.workspace.getConfiguration('codingAgent');
             await config.update('model', pendingUpdate.modelId, vscode.ConfigurationTarget.Global);
-            this.agent.setModel(pendingUpdate.modelId);
+            this.agent.setModel(pendingUpdate.modelId, 'deepseek');
             await this.context.globalState.update('codingAgent.knownModelVersion', pendingUpdate.version);
             await this.context.globalState.update('codingAgent.pendingModelUpdate', undefined);
         }
@@ -418,7 +418,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         const provider = this.currentProvider();
         const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
         const modelId = vscode.workspace.getConfiguration('codingAgent').get<string>(modelKey, provider === 'glm' ? GLM_DEFAULT_MODEL : 'deepseek-v4-pro');
-        this.agent.setModel(modelId);
+        this.agent.setModel(modelId, provider);
 
         const apiKey = provider === 'glm'
             ? await this.context.secrets.get(GLM_API_KEY_SECRET)
@@ -486,7 +486,7 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             activeId: activeConversation.id,
             loading,
             provider: this.currentProvider(),
-            model: this.agent.getModel(),
+            model: this.agent.getModel(this.currentProvider()),
         });
     }
 
@@ -848,7 +848,7 @@ export function activate(context: vscode.ExtensionContext) {
         const config2 = vscode.workspace.getConfiguration('codingAgent');
         const modelKey = provider === 'glm' ? GLM_MODEL_KEY : DEEPSEEK_MODEL_KEY;
         const modelId = config2.get<string>(modelKey, provider === 'glm' ? GLM_DEFAULT_MODEL : 'deepseek-v4-pro');
-        agent.setModel(modelId);
+        agent.setModel(modelId, provider);
 
         const prompt = buildRepairPrompt(unresolved);
         const fingerprints = unresolved.map((entry) => entry.fingerprint);
