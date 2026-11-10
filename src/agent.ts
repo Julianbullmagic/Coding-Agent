@@ -15,6 +15,7 @@ import {
     extractGlmText,
     GLM_REASONING_EFFORT,
     glmSupportsReasoningEffort,
+    interpretGlmError,
     GLM_DEFAULT_MODEL,
 } from './providers';
 
@@ -790,11 +791,17 @@ export class CodingAgent {
                 glmBody.reasoning_effort = GLM_REASONING_EFFORT;
             }
             const requestBody: string = JSON.stringify(glmBody);
-            const response = await requestJson<GlmCompletionResponse>(
-                endpoint,
-                requestBody,
-                apiKey,
-            );
+            let response: GlmCompletionResponse;
+            try {
+                response = await requestJson<GlmCompletionResponse>(
+                    endpoint,
+                    requestBody,
+                    apiKey,
+                );
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                throw new Error(interpretGlmError(detail));
+            }
             const choice = response.choices?.[0];
             const message = choice?.message;
             if (!message) {
