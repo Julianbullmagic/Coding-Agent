@@ -39,6 +39,29 @@ const LOCAL_PORT = 9876;
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (prompt) => new Promise(resolve => rl.question(prompt, resolve));
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function isQuotaError(error) {
+    const msg = error.message || '';
+    return msg.includes('Quota exceeded') || msg.includes('rate limit') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429');
+}
+
+async function retryWithBackoff(fn, label = 'Request', maxRetries = 5, baseDelay = 2000) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (e) {
+            if (attempt < maxRetries && isQuotaError(e)) {
+                const delay = baseDelay * Math.pow(2, attempt);
+                console.log(`  ⏳ ${label}: quota hit, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+                await sleep(delay);
+                continue;
+            }
+            throw e;
+        }
+    }
+}
+
 function httpsRequest(url, method, body, headers = {}) {
     return new Promise((resolve, reject) => {
         const parsed = new URL(url);
@@ -60,6 +83,14 @@ function httpsRequest(url, method, body, headers = {}) {
                 if (res.statusCode >= 200 && res.statusCode < 300) {
                     resolve(parsedBody ?? { raw });
                     return;
+                }
+                // Check for quota/rate limit errors specifically
+                if (res.statusCode === 429 || res.statusCode === 403) {
+                    const errDetail = (parsedBody?.error?.message || '') + (parsedBody?.error?.details?.[0]?.reason || '');
+                    if (errDetail.includes('Quota') || errDetail.includes('rateLimit') || errDetail.includes('RESOURCE_EXHAUSTED') || res.statusCode === 429) {
+                        reject(new Error(`Quota exceeded: ${errDetail || raw.slice(0, 200)}`));
+                        return;
+                    }
                 }
                 const detail = (parsedBody && (parsedBody.error?.message || parsedBody.error_description || parsedBody.error)) || `HTTP ${res.statusCode}: ${raw.slice(0, 300)}`;
                 reject(new Error(typeof detail === 'string' ? detail : `HTTP ${res.statusCode}`));
@@ -160,7 +191,12 @@ async function authorize(clientId, clientSecret) {
 async function findFirstLocation(accessToken) {
     const params = new URLSearchParams({ readMask: 'name,title', pageSize: '10' });
     const url = `${BUSINESS_INFO_BASE}/accounts/-/locations?${params.toString()}`;
-    const result = await httpsRequest(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
+    const result = await retryWithBackoff(
+        () => httpsRequest(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` }),
+        'Find location',
+        5,
+        3000  // Start with 3s delay for Business Info API (stricter quotas)
+    );
     const locations = result.locations ?? [];
     if (locations.length === 0) return null;
     if (locations.length > 1) {
@@ -178,7 +214,12 @@ async function findFirstLocation(accessToken) {
 async function listAllReviews(accessToken, location, pageSize = 50) {
     const params = new URLSearchParams({ pageSize: String(pageSize), orderBy: 'updateTime desc' });
     const url = `${MYBUSINESS_BASE}/${location}/reviews?${params.toString()}`;
-    const result = await httpsRequest(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` });
+    const result = await retryWithBackoff(
+        () => httpsRequest(url, 'GET', undefined, { Authorization: `Bearer ${accessToken}` }),
+        'List reviews',
+        5,
+        3000
+    );
     
     const starMap = { FIVE: 5, FOUR: 4, THREE: 3, TWO: 2, ONE: 1 };
     return (result.reviews ?? []).map(r => ({
@@ -194,7 +235,12 @@ async function listAllReviews(accessToken, location, pageSize = 50) {
 
 async function replyToReview(accessToken, reviewName, comment) {
     const url = `${MYBUSINESS_BASE}/${reviewName}/reply`;
-    return httpsRequest(url, 'PUT', { comment }, { Authorization: `Bearer ${accessToken}` });
+    return retryWithBackoff(
+        () => httpsRequest(url, 'PUT', { comment }, { Authorization: `Bearer ${accessToken}` }),
+        `Reply to ${reviewName.split('/').pop()}`,
+        5,
+        3000
+    );
 }
 
 // ─── Draft reply based on rating ─────────────────────────────────────
@@ -379,6 +425,8 @@ async function main() {
                 await replyToReview(tokens.access_token, review.name, reply);
                 console.log(`  ✅ Replied to ${review.reviewer}'s ${review.rating}-star review`);
                 posted++;
+                // Add a small delay between posts to avoid quota issues
+                if (posted < toPost.length) await sleep(1500);
             } catch (e) {
                 console.error(`  ❌ Failed to reply to ${review.name}: ${e.message}`);
             }
@@ -402,6 +450,7 @@ async function main() {
                         await replyToReview(tokens.access_token, review.name, edited.trim());
                         console.log('  ✅ Custom reply posted!');
                         posted++;
+                        await sleep(1500);
                     } catch (e) {
                         console.error(`  ❌ Failed: ${e.message}`);
                     }
@@ -411,6 +460,7 @@ async function main() {
                     await replyToReview(tokens.access_token, review.name, reply);
                     console.log('  ✅ Posted!');
                     posted++;
+                    await sleep(1500);
                 } catch (e) {
                     console.error(`  ❌ Failed: ${e.message}`);
                 }
