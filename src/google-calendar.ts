@@ -265,13 +265,21 @@ function httpsRequestJson(url: string, method: 'GET' | 'POST' | 'PATCH' | 'DELET
             res.on('data', (c: Buffer) => chunks.push(c));
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf8');
-                let parsedBody: any;
-                try { parsedBody = raw ? JSON.parse(raw) : {}; } catch { parsedBody = { raw }; }
-                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                    resolve(parsedBody);
-                } else {
-                    reject(new Error(parsedBody?.error_description || parsedBody?.error?.message || parsedBody?.error || `HTTP ${res.statusCode}`));
+                // Prefer JSON, keep raw text as fallback so non-JSON errors
+                // (e.g. a redirect page echoing an auth code) stay diagnosable.
+                let parsedBody: any = null;
+                if (raw) {
+                    try { parsedBody = JSON.parse(raw); } catch { parsedBody = null; }
                 }
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(parsedBody ?? { raw });
+                    return;
+                }
+                const detail =
+                    (parsedBody && (parsedBody.error_description || parsedBody.error?.message || parsedBody.error)) ||
+                    (raw && !raw.startsWith('{') ? raw.slice(0, 400) : undefined) ||
+                    `HTTP ${res.statusCode}`;
+                reject(new Error(typeof detail === 'string' ? detail : `HTTP ${res.statusCode}`));
             });
         });
         req.setTimeout(30000, () => req.destroy(new Error('Google request timed out.')));

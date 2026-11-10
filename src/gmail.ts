@@ -220,6 +220,20 @@ export function extractGmailAuthorizationCode(input: string): string {
     return trimmed.split(/[&\s]/)[0];
 }
 
+/**
+ * Turn a raw HTTP body into a ParseResult: prefer JSON, but keep the raw text
+ * so callers can surface a meaningful error when Google returns a non-JSON
+ * response (e.g. a redirect page whose body echoes the auth code).
+ */
+function parseResponseBody(raw: string): { parsed: any; raw: string } {
+    if (!raw) return { parsed: {}, raw: '' };
+    try {
+        return { parsed: JSON.parse(raw), raw };
+    } catch {
+        return { parsed: null, raw };
+    }
+}
+
 function httpsRequestJson(
     url: string,
     method: 'GET' | 'POST',
@@ -248,13 +262,19 @@ function httpsRequestJson(
             res.on('data', (c: Buffer) => chunks.push(c));
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf8');
-                let parsedBody: any;
-                try { parsedBody = raw ? JSON.parse(raw) : {}; } catch { parsedBody = { raw }; }
+                const { parsed: parsedBody } = parseResponseBody(raw);
                 if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                    resolve(parsedBody);
-                } else {
-                    reject(new Error(parsedBody?.error_description || parsedBody?.error?.message || parsedBody?.error || `HTTP ${res.statusCode}`));
+                    resolve(parsedBody ?? { raw });
+                    return;
                 }
+                // Build a meaningful error. Google OAuth errors are JSON, but a
+                // redirect_uri_mismatch or other auth-page error can come back as
+                // HTML/plain text; surface the raw body so it's diagnosable.
+                const detail =
+                    (parsedBody && (parsedBody.error_description || parsedBody.error?.message || parsedBody.error)) ||
+                    (raw.startsWith('{') ? undefined : raw.slice(0, 400)) ||
+                    `HTTP ${res.statusCode}`;
+                reject(new Error(typeof detail === 'string' ? detail : `HTTP ${res.statusCode}`));
             });
         });
         req.setTimeout(30000, () => req.destroy(new Error('Google request timed out.')));
