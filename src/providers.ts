@@ -48,10 +48,20 @@ export const GLM_DEFAULT_MODEL = 'glm-5.3-flash';
 // too slow to answer within the timeout.
 export const GLM_FLASH_FALLBACK_MODEL = 'glm-5.3-flash';
 
-// Reasoning effort for GLM 5.x reasoning models (low/medium/high/max).
-// Non-reasoning models ignore or reject this field, so it is only attached
-// when the selected model is a reasoning variant.
-export const GLM_REASONING_EFFORT = 'medium' as const;
+// Reasoning effort for GLM 5.x reasoning models.
+//
+// NOTE: these models ALWAYS think and cannot be disabled. z.ai rejects a
+// "none"/"off"/"disabled" reasoning value with:
+//   "This model always engages in thinking and cannot be disabled; please use
+//    low, high, or max"
+// The only accepted values are `low`, `high`, and `max` — there is no `medium`
+// and no off switch. We use `low` to keep latency reasonable by default while
+// remaining valid.
+export const GLM_REASONING_EFFORT = 'low' as const;
+
+// The set of valid `reasoning_effort` values accepted by GLM 5.x reasoning
+// models on z.ai. Anything outside this set is rejected by the API.
+const GLM_VALID_REASONING_EFFORTS: ReadonlySet<string> = new Set(['low', 'high', 'max']);
 
 // Models that support the `reasoning_effort` request field on z.ai.
 const GLM_REASONING_MODELS: ReadonlySet<string> = new Set([
@@ -62,6 +72,19 @@ const GLM_REASONING_MODELS: ReadonlySet<string> = new Set([
     'glm-5.3-flash',
     'glm-5.3-flashx',
 ]);
+
+/**
+ * True when a model id belongs to the GLM / z.ai / Zhipu family rather than
+ * DeepSeek. This is used to stop a GLM id (e.g. `glm-5.3`) from ever being
+ * sent to DeepSeek's endpoints, which reject non-DeepSeek ids with
+ * "The supported API model names are deepseek-flash, deepseek-v4-pro, but you
+ * passed glm-5.3."
+ */
+export function isGlmModelId(modelId: string | undefined): boolean {
+    const id = (modelId ?? '').trim().toLowerCase();
+    if (!id) return false;
+    return /^(glm|z-?ai|zhipu|chatglm)[\d-]/.test(id) || id.startsWith('glm');
+}
 
 /**
  * Normalize a user-supplied GLM model id into a value that z.ai actually
@@ -96,7 +119,10 @@ export function normalizeGlmModel(modelId: string | undefined, fallback: string 
  * Resolve the provider configuration for a given provider id and model id.
  *
  * The model id is user-configurable. When switching to GLM and no explicit
- * GLM model has been chosen yet, we fall back to a stable GLM alias.
+ * GLM model has been chosen yet, we fall back to a stable GLM alias. When the
+ * DeepSeek provider is selected but the configured model id is actually a GLM
+ * id (e.g. the user typed `glm-5.3` into the DeepSeek model setting), we fall
+ * back to `deepseek-v4-pro` rather than sending a non-DeepSeek id to DeepSeek.
  */
 export function resolveProvider(provider: Provider, modelId?: string): ProviderConfig {
     if (provider === 'glm') {
@@ -107,9 +133,15 @@ export function resolveProvider(provider: Provider, modelId?: string): ProviderC
             openAIStyle: true,
         };
     }
+
+    // DeepSeek: never hand the DeepSeek API a GLM/z.ai model id. The /models
+    // and /responses endpoints reject it with "The supported API model names
+    // are deepseek-flash, deepseek-v4-pro, but you passed glm-5.3."
+    const trimmed = (modelId ?? '').trim();
+    const model = trimmed && !isGlmModelId(trimmed) ? trimmed : 'deepseek-v4-pro';
     return {
         endpoint: 'https://api.deepseek.com/responses',
-        model: (modelId && modelId.trim()) || 'deepseek-v4-pro',
+        model,
         openAIStyle: false,
     };
 }
@@ -119,6 +151,19 @@ export function resolveProvider(provider: Provider, modelId?: string): ProviderC
  */
 export function glmSupportsReasoningEffort(modelId: string): boolean {
     return GLM_REASONING_MODELS.has(modelId.trim().toLowerCase());
+}
+
+/**
+ * Resolve a safe `reasoning_effort` value for a GLM model.
+ *
+ * GLM 5.x reasoning models always think and only accept `low`, `high`, or
+ * `max`. If the default (or a caller-supplied) effort is somehow not in that
+ * set, we clamp it to `low` so the request is never rejected with
+ * "This model always engages in thinking and cannot be disabled...".
+ */
+export function resolveGlmReasoningEffort(effort: string = GLM_REASONING_EFFORT): string {
+    const value = (effort ?? '').trim().toLowerCase();
+    return GLM_VALID_REASONING_EFFORTS.has(value) ? value : GLM_REASONING_EFFORT;
 }
 
 /**
@@ -269,6 +314,17 @@ export function interpretGlmError(message: string): string {
             '',
             'Diagnosis: z.ai did not respond within the timeout.',
             'Fix: retry the request. If it keeps timing out, use a faster model (e.g. glm-5.3-flash), which the agent will now attempt automatically.',
+        ].join('\n');
+    }
+
+    // GLM 5.x reasoning models always think and reject an invalid/off
+    // `reasoning_effort` value. Catch this specific shape and give a clear fix.
+    if (lower.includes('cannot be disabled') || (lower.includes('thinking') && lower.includes('low'))) {
+        return [
+            'GLM request failed: ' + raw,
+            '',
+            'Diagnosis: this model always engages in reasoning (thinking) and rejects a disabled or invalid reasoning_effort value.',
+            'Fix: use reasoning_effort "low", "high", or "max" (not "none", "off", or "medium"). This is now handled automatically.',
         ].join('\n');
     }
 

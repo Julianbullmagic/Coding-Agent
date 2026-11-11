@@ -15,6 +15,7 @@ import {
     GlmToolCall,
     extractGlmText,
     GLM_REASONING_EFFORT,
+    resolveGlmReasoningEffort,
     glmSupportsReasoningEffort,
     interpretGlmError,
     GLM_DEFAULT_MODEL,
@@ -485,11 +486,42 @@ async function createGitHubRepository(workspacePath: string, args: Record<string
         if (!String(error).toLowerCase().includes('nothing to commit')) throw error;
     }
 
-    const ghArgs = ['repo', 'create', name, '--source', workspacePath, '--remote', 'origin', visibility === 'private' ? '--private' : '--public', '--push'];
+    // Create the repository WITHOUT the fragile `--source/--remote/--push`
+    // combination, which fails on some `gh` versions with
+    // "the `--remote` option can only be used with `--source`". Create an
+    // empty repo, then wire up the `origin` remote and push manually.
+    const createArgs = ['repo', 'create', name, visibility === 'private' ? '--private' : '--public'];
     if (typeof args.description === 'string' && args.description.trim()) {
-        ghArgs.push('--description', args.description.trim());
+        createArgs.push('--description', args.description.trim());
     }
-    return runProcess('gh', ghArgs, workspacePath);
+    await runProcess('gh', createArgs, workspacePath);
+
+    // Resolve the remote URL for the newly created repo.
+    let originUrl = '';
+    try {
+        originUrl = await runProcess('gh', ['repo', 'view', name, '--json', 'url', '--jq', '.url'], workspacePath);
+    } catch {
+        originUrl = '';
+    }
+    if (!originUrl) {
+        const userJson = await runProcess('gh', ['api', 'user', '--jq', '.login'], workspacePath);
+        const login = userJson.trim();
+        if (!login) throw new Error('Could not resolve the new repository URL after creating it.');
+        originUrl = `https://github.com/${login}/${name}.git`;
+    }
+
+    // Ensure `origin` points at the new repo, then push HEAD.
+    let currentRemote = '';
+    try {
+        currentRemote = await runProcess('git', ['config', '--get', 'remote.origin.url'], workspacePath);
+    } catch {
+        currentRemote = '';
+    }
+    if (!currentRemote) {
+        await runProcess('git', ['remote', 'add', 'origin', originUrl], workspacePath);
+    }
+    await runProcess('git', ['push', '--set-upstream', 'origin', 'HEAD'], workspacePath);
+    return name;
 }
 
 async function commitAndPush(workspacePath: string, args: Record<string, unknown>): Promise<string> {
@@ -815,7 +847,7 @@ export class CodingAgent {
                     tool_choice: 'auto',
                 };
                 if (glmSupportsReasoningEffort(activeModel)) {
-                    glmBody.reasoning_effort = GLM_REASONING_EFFORT;
+                    glmBody.reasoning_effort = resolveGlmReasoningEffort(GLM_REASONING_EFFORT);
                 }
                 const requestBody: string = JSON.stringify(glmBody);
                 try {
