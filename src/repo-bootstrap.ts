@@ -87,11 +87,26 @@ async function ghCreateRepo(name: string, cwd: string): Promise<void> {
     if (!cwd || !cwd.trim()) {
         throw new Error('Cannot create a GitHub repository without a valid workspace path.');
     }
-    await run(
-        'gh',
-        ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--private', '--push'],
-        cwd,
-    );
+    // Avoid the fragile `--source/--remote/--push` combination (which fails with
+    // "the `--remote` option can only be used with `--source`" on some gh
+    // versions). Create the empty repo, then resolve the origin URL and wire it
+    // up + push manually.
+    await run('gh', ['repo', 'create', name, '--private'], cwd);
+
+    let originUrl = '';
+    try {
+        originUrl = await run('gh', ['repo', 'view', name, '--json', 'url', '--jq', '.url'], cwd);
+    } catch {
+        // Fall back to the authenticated user's namespace.
+        const userJson = await run('gh', ['api', 'user', '--jq', '.login'], cwd);
+        const login = userJson.trim();
+        if (login) originUrl = `https://github.com/${login}/${name}.git`;
+    }
+
+    if (!(await currentRemote(cwd)) && originUrl) {
+        await run('git', ['remote', 'add', 'origin', originUrl], cwd);
+    }
+    await run('git', ['push', '--set-upstream', 'origin', 'HEAD'], cwd);
 }
 
 /**
@@ -150,7 +165,7 @@ export async function ensureRepoOnOpen(cwd: string, folderName: string): Promise
 
     // Create the repo as *private* (never fall back to public).
     // If there are no commits yet, push an empty first commit so GitHub
-    // accepts `--push`; otherwise push the existing history.
+    // accepts the push; otherwise push the existing history.
     if (!(await hasCommits(cwd))) {
         await run('git', ['add', '-A'], cwd);
         try {

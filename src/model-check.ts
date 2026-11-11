@@ -21,6 +21,20 @@ interface ListModelsResponse {
 const MODELS_ENDPOINT = 'https://api.deepseek.com/models';
 const PRICING_PAGE_URL = 'https://api-docs.deepseek.com/quick_start/pricing';
 
+/**
+ * The model-check feature is DeepSeek-specific: it reads DeepSeek's public
+ * model list and pricing page. If a GLM (z.ai) model id leaks in here (for
+ * example because the user set `codingAgent.model` to `glm-5.3` while the
+ * provider selector was left on DeepSeek), `https://api.deepseek.com/models`
+ * rejects the request with "The supported API model names are deepseek-flash,
+ * deepseek-v4-pro, but you passed glm-5.3." Detect that shape up-front and
+ * short-circuit so we never hand a non-DeepSeek id to the DeepSeek API.
+ */
+export function isLikelyGlmModelId(modelId: string | undefined): boolean {
+    const id = (modelId ?? '').trim().toLowerCase();
+    return /^(glm|z?-ai|zhipu|chatglm)[\d-]/.test(id) || id.startsWith('glm');
+}
+
 function requestText(url: URL, apiKey?: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
         const headers: http.OutgoingHttpHeaders = { Accept: 'application/json,text/html,*/*' };
@@ -36,7 +50,18 @@ function requestText(url: URL, apiKey?: string): Promise<string> {
                 const body = Buffer.concat(chunks).toString('utf8');
                 const status = response.statusCode ?? 0;
                 if (status < 200 || status >= 300) {
-                    reject(new Error(`Model check request failed: HTTP ${status}`));
+                    // Surface the underlying API error (e.g. "The supported API
+                    // model names are ... but you passed ...") rather than a
+                    // generic HTTP status, so the user sees the real cause.
+                    let detail = `Model check request failed: HTTP ${status}`;
+                    try {
+                        const parsed = JSON.parse(body) as { error?: { message?: string } };
+                        if (parsed.error?.message) detail = parsed.error.message;
+                    } catch {
+                        const text = body.trim();
+                        if (text) detail = `Model check request failed: ${text.slice(0, 300)}`;
+                    }
+                    reject(new Error(detail));
                     return;
                 }
                 resolve(body);
@@ -103,6 +128,14 @@ export async function checkLatestModel(
     apiKey: string | undefined,
     preferredModelId: string,
 ): Promise<ModelInfo> {
+    // Never probe DeepSeek with a GLM/z.ai model id. The DeepSeek /models
+    // endpoint rejects non-DeepSeek ids with "The supported API model names are
+    // deepseek-flash, deepseek-v4-pro, but you passed <glm-...>." Return the
+    // caller's value unchanged so the check is effectively a no-op for GLM.
+    if (isLikelyGlmModelId(preferredModelId)) {
+        return { id: preferredModelId, name: preferredModelId, version: '' };
+    }
+
     const available = await fetchAvailableModels(apiKey);
     let selectedId = preferredModelId;
     if (!available.some((model) => model.id === preferredModelId)) {

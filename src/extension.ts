@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { CodingAgent } from './agent';
 // import { ensureLocalSearxng } from './searxng'; // SearXNG disabled: using DeepSeek web_search
-import { checkLatestModel } from './model-check';
+import { checkLatestModel, isLikelyGlmModelId } from './model-check';
 import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
 import { ensureRepoOnOpen } from './repo-bootstrap';
@@ -10,6 +10,7 @@ import { detectWorkspaceFolder } from './path-detection';
 import { RagConversation, retrieveRelevantContext, shouldRetrieve, formatRetrievedContext } from './rag';
 import { LOGIN_COMMAND, LOGIN_TERMINAL_NAME, LOGIN_POLL_INTERVAL_MS, LOGIN_POLL_TIMEOUT_MS, shouldKeepPolling, nextPollDelay, buildLoginSuccessMessage, buildLoginTimeoutWarning } from './login-flow';
 import { GLM_API_KEY_SECRET, PROVIDER_KEY, GLM_MODEL_KEY, GLM_DEFAULT_MODEL, Provider } from './providers';
+import { PromptQueueItem, enqueuePrompt, removePrompt, shiftPrompt } from './prompt-queue';
 import {
     GOOGLE_CLIENT_ID_SECRET,
     GOOGLE_CLIENT_SECRET_SECRET,
@@ -69,6 +70,8 @@ import {
 
 const API_KEY_SECRET = 'codingAgent.deepseekApiKey';
 const DEEPSEEK_MODEL_KEY = 'codingAgent.model';
+const PROMPT_QUEUE_KEY = 'codingAgent.promptQueue';
+const PROMPT_QUEUE_STOP_KEY = 'codingAgent.promptQueueStop';
 
 interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 interface Conversation { id: string; title: string; updatedAt: number; messages: ChatMessage[]; }
@@ -415,7 +418,13 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
                 await this.deleteConversation(message.id);
                 this.postState(view);
             } else if (message.type === 'send' && message.text?.trim()) {
-                await this.send(view, message.text.trim());
+                await this.enqueue(view, message.text.trim());
+            } else if (message.type === 'deleteQueueItem' && message.id) {
+                await this.deleteQueueItem(view, message.id);
+            } else if (message.type === 'clearQueue') {
+                await this.clearQueue(view);
+            } else if (message.type === 'stopQueue') {
+                await this.stopQueue(view);
             } else if (message.type === 'setApiKey') {
                 await vscode.commands.executeCommand('codingAgent.setApiKey');
                 this.postState(view);
@@ -491,13 +500,99 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
         await this.context.workspaceState.update('codingAgent.conversations', updated);
     }
 
-    private async send(view: vscode.WebviewView, text: string): Promise<void> {
-        let conversation = this.active();
-        if (!conversation) conversation = await this.createConversation();
-        const history = conversation.messages;
-        const messages = [...history, { role: 'user' as const, content: text }];
-        await this.save(conversation.id, messages);
-        this.postState(view, true);
+        // --- Prompt queue -------------------------------------------------------
+    // The user can keep submitting prompts while the agent is still working.
+    // Each prompt is appended to a persisted queue and processed one at a time
+    // in the background, so the composer never blocks. Items can be deleted
+    // individually, the whole queue cleared, or processing stopped after the
+    // current item finishes.
+
+    private queueState(): PromptQueueItem[] {
+        const stored = this.context.workspaceState.get<unknown>(PROMPT_QUEUE_KEY);
+        if (Array.isArray(stored)) {
+            return stored.filter((item): item is PromptQueueItem =>
+                !!item && typeof item === 'object'
+                && typeof (item as PromptQueueItem).id === 'string'
+                && typeof (item as PromptQueueItem).text === 'string');
+        }
+        return [];
+    }
+
+    private async saveQueueState(queue: PromptQueueItem[]): Promise<void> {
+        await this.context.workspaceState.update(PROMPT_QUEUE_KEY, queue);
+    }
+
+    private stopRequested(): boolean {
+        return this.context.workspaceState.get<boolean>(PROMPT_QUEUE_STOP_KEY, false);
+    }
+
+    private processing = false;
+
+    private async enqueue(view: vscode.WebviewView, text: string): Promise<void> {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+
+        // Append to the queue only. The prompt text is shown in the queue panel
+        // until it runs; the user/assistant messages are written to the
+        // conversation at run time so history stays correct even when several
+        // prompts are queued back to back.
+        const queue = enqueuePrompt(this.queueState(), trimmed);
+        await this.saveQueueState(queue);
+        await this.context.workspaceState.update(PROMPT_QUEUE_STOP_KEY, false);
+        this.postState(view);
+
+        void this.processQueue(view);
+    }
+
+    private async deleteQueueItem(view: vscode.WebviewView, id: string): Promise<void> {
+        const queue = removePrompt(this.queueState(), id);
+        await this.saveQueueState(queue);
+        this.postState(view);
+    }
+
+    private async clearQueue(view: vscode.WebviewView): Promise<void> {
+        await this.saveQueueState([]);
+        this.postState(view);
+    }
+
+    private async stopQueue(view: vscode.WebviewView): Promise<void> {
+        await this.context.workspaceState.update(PROMPT_QUEUE_STOP_KEY, true);
+        this.postState(view);
+    }
+
+    // Runs queued prompts sequentially until the queue is empty or a stop is
+    // requested. Non-reentrant via this.processing.
+    private async processQueue(view: vscode.WebviewView): Promise<void> {
+        if (this.processing) return;
+        this.processing = true;
+        try {
+            while (true) {
+                if (this.stopRequested()) {
+                    // Clear whatever is left so a fresh start is unambiguous.
+                    await this.saveQueueState([]);
+                    await this.context.workspaceState.update(PROMPT_QUEUE_STOP_KEY, false);
+                    this.postState(view);
+                    break;
+                }
+                const { item, queue } = shiftPrompt(this.queueState());
+                if (!item) break;
+                await this.saveQueueState(queue);
+                this.postState(view, true);
+                await this.runOne(view, item);
+            }
+        } finally {
+            this.processing = false;
+        }
+        this.postState(view);
+    }
+
+    // Execute a single queued prompt against the agent and append the result to
+    // the conversation it belonged to when it was enqueued.
+    private async runOne(view: vscode.WebviewView, item: PromptQueueItem): Promise<void> {
+        const conversation = this.active();
+        if (!conversation) {
+            await this.createConversation();
+        }
 
         const pendingUpdate = this.context.globalState.get<{
             modelId: string;
@@ -532,39 +627,49 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             this.postState(view);
             return;
         }
+
+        // Resolve the conversation this prompt belongs to and persist the user
+        // message now (matching the original send flow). The prior history is
+        // everything before this prompt, so multi-item queues keep the correct
+        // user/assistant ordering.
+        let conv = this.active();
+        if (!conv) conv = await this.createConversation();
+        const history = conv.messages;
+        const messages = [...history, { role: 'user' as const, content: item.text }];
+        await this.save(conv.id, messages);
+        this.postState(view, true);
+
         try {
             const searxngBaseUrl = vscode.workspace.getConfiguration('codingAgent').get<string>('searxngBaseUrl', 'http://localhost:8080');
             const maxToolRounds = vscode.workspace.getConfiguration('codingAgent').get<number>('maxToolRounds', 1000);
             const folder = detectWorkspaceFolder();
             if (!folder) {
-                await this.save(conversation.id, [...messages, { role: 'assistant', content: 'Open a folder or workspace before chatting so I can see your files.' }]);
-                this.postState(view);
+                await this.save(conv.id, [...messages, { role: 'assistant', content: 'Open a folder or workspace before chatting so I can see your files.' }]);
                 return;
             }
             const workspacePath = folder.uri.fsPath;
-            let effectivePrompt = text;
-            if (shouldRetrieve(text)) {
+            let effectivePrompt = item.text;
+            if (shouldRetrieve(item.text)) {
                 const results = retrieveRelevantContext({
-                    query: text,
+                    query: item.text,
                     conversations: this.conversations(),
-                    excludeConversationId: conversation.id,
+                    excludeConversationId: conv.id,
                     limit: 3,
                 });
                 const contextBlock = formatRetrievedContext(results);
                 if (contextBlock) {
-                    effectivePrompt = contextBlock + '\n\n---\n\nUser request: ' + text;
+                    effectivePrompt = contextBlock + '\n\n---\n\nUser request: ' + item.text;
                 }
             }
             const response = await this.agent.provideSuggestions(effectivePrompt, apiKey, searxngBaseUrl, history, workspacePath, maxToolRounds, provider);
             await resolveSource(this.context, provider === 'glm' ? 'glm-request' : 'deepseek-request');
-            await this.save(conversation.id, [...messages, { role: 'assistant', content: response.trim() }]);
+            await this.save(conv.id, [...messages, { role: 'assistant', content: response.trim() }]);
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
             const source = classifySource(error);
             await recordError(this.context, source, error);
-            await this.save(conversation.id, [...messages, { role: 'assistant', content: `Request failed: ${detail}` }]);
+            await this.save(conv.id, [...messages, { role: 'assistant', content: `Request failed: ${detail}` }]);
         }
-        this.postState(view);
     }
 
     private postState(view: vscode.WebviewView, loading = false): void {
@@ -587,14 +692,17 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             loading,
             provider: this.currentProvider(),
             model: this.agent.getModel(this.currentProvider()),
+            queue: this.queueState(),
+            stopping: this.stopRequested(),
+            processing: this.processing,
         });
     }
 
     private html(): string {
         return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-        :root{color-scheme:light dark}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;font-family:var(--vscode-font-family);font-size:12px;color:var(--vscode-foreground);background:var(--vscode-sideBar-background)}.shell{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}.tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.tab{height:38px;border-radius:0;background:transparent;color:var(--vscode-foreground)}.tab.active{box-shadow:inset 0 -2px var(--vscode-focusBorder);background:var(--vscode-list-hoverBackground)}.panel{display:none!important;min-height:0;overflow:hidden}.panel.active{display:block!important}.sidebar{overflow-y:auto;padding:8px}.chat{min-width:0;height:100%}.chat.active{display:grid!important;grid-template-rows:auto minmax(0,1fr) auto}.modelbar{display:flex;gap:6px;padding:8px 10px 0}.modelbtn{flex:1;height:28px;padding:0 8px;border-radius:4px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);cursor:pointer}.modelbtn.active{background:var(--vscode-button-background);color:var(--vscode-button-foreground);border-color:var(--vscode-button-background)}.modelbtn:disabled{opacity:.55;cursor:default}.messages{min-height:0;overflow-y:auto;padding:12px 10px}.message{margin:8px 0;padding:8px;border-radius:6px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.user{background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);margin-left:12px}.assistant{border-left:2px solid var(--vscode-focusBorder)}button{border:0;border-radius:4px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}.new{width:100%;min-height:36px;height:auto;margin-bottom:8px;padding:8px 6px;line-height:18px;white-space:normal}.conversation{display:block;width:100%;min-height:36px;height:auto;text-align:left;margin:3px 0;padding:7px 8px;background:transparent;color:var(--vscode-sideBar-foreground);white-space:normal;overflow-wrap:anywhere;line-height:16px}.conversation.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.conversation-row{display:flex;align-items:stretch;gap:4px}.conversation-row .conversation{flex:1;min-width:0}.delete-conversation{flex:0 0 24px;width:24px;height:24px;margin-top:6px;padding:0;line-height:22px;background:transparent;color:var(--vscode-descriptionForeground)}.delete-conversation:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.composer{display:flex;align-items:flex-end;gap:8px;padding:8px;border-top:1px solid var(--vscode-panel-border)}textarea{resize:none;flex:1;min-width:0;min-height:40px;padding:8px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}.send{flex:0 0 58px;width:58px;height:40px;padding:0;line-height:40px}.send:disabled{cursor:default;opacity:.55}.loading{opacity:.7}@media(max-width:280px){.composer{gap:4px;padding:6px}.send{flex-basis:48px;width:48px}}
-        </style></head><body><div class="shell"><nav class="tabs" aria-label="Coding Agent views"><button class="tab" id="historyTab">History</button><button class="tab active" id="chatTab">Chat</button></nav><aside class="panel sidebar" id="historyPanel"><button class="new" id="new">+ New chat</button><div id="history"></div></aside><main class="panel chat active" id="chatPanel"><div class="modelbar"><button class="modelbtn" id="modelDeepseek">DeepSeek</button><button class="modelbtn" id="modelGlm">GLM</button></div><div class="messages" id="messages"></div><div class="composer"><textarea id="input" rows="1" placeholder="Message DeepSeek Coding Agent"></textarea><button class="send" id="send">Send</button></div></main></div><script>
-        const vscode=acquireVsCodeApi();let state={conversations:[],activeId:'',loading:false};const messages=document.getElementById('messages'),history=document.getElementById('history'),input=document.getElementById('input'),send=document.getElementById('send'),chatTab=document.getElementById('chatTab'),historyTab=document.getElementById('historyTab'),chatPanel=document.getElementById('chatPanel'),historyPanel=document.getElementById('historyPanel'),modelDeepseek=document.getElementById('modelDeepseek'),modelGlm=document.getElementById('modelGlm');modelDeepseek.onclick=()=>{if(state.provider!=='deepseek')vscode.postMessage({type:'setProvider',provider:'deepseek'})};modelGlm.onclick=()=>{if(state.provider!=='glm')vscode.postMessage({type:'setProvider',provider:'glm'})};function selectTab(tab){const showChat=tab==='chat';chatTab.classList.toggle('active',showChat);historyTab.classList.toggle('active',!showChat);chatPanel.classList.toggle('active',showChat);historyPanel.classList.toggle('active',!showChat)}chatTab.onclick=()=>selectTab('chat');historyTab.onclick=()=>selectTab('history');document.getElementById('new').onclick=()=>{vscode.postMessage({type:'new'});selectTab('chat')};send.onclick=()=>{const text=input.value.trim();if(!text||state.loading)return;input.value='';vscode.postMessage({type:'send',text})};input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send.click()}};addEventListener('message',event=>{if(event.data.type!=='state')return;state=event.data;modelDeepseek.classList.toggle('active',state.provider!=='glm');modelGlm.classList.toggle('active',state.provider==='glm');history.replaceChildren();for(const conversation of state.conversations||[]){const row=document.createElement('div');row.className='conversation-row';const button=document.createElement('button');button.className='conversation'+(conversation.id===state.activeId?' active':'');button.textContent=conversation.title;button.title=conversation.title;button.onclick=()=>{vscode.postMessage({type:'open',id:conversation.id});selectTab('chat')};const remove=document.createElement('button');remove.className='delete-conversation';remove.textContent='x';remove.title='Delete conversation';remove.setAttribute('aria-label','Delete conversation');remove.onclick=()=>vscode.postMessage({type:'delete',id:conversation.id});row.appendChild(button);row.appendChild(remove);history.appendChild(row)}const conversation=(state.conversations||[]).find(item=>item.id===state.activeId)||(state.conversations&&state.conversations[0]);messages.replaceChildren();for(const message of conversation?conversation.messages:[]){const element=document.createElement('div');element.className='message '+message.role;element.textContent=message.content;messages.appendChild(element)}if(state.loading){const element=document.createElement('div');element.className='message assistant loading';element.textContent='Thinking...';messages.appendChild(element)}send.disabled=state.loading;messages.scrollTop=messages.scrollHeight});vscode.postMessage({type:'ready'});
+        :root{color-scheme:light dark}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;font-family:var(--vscode-font-family);font-size:12px;color:var(--vscode-foreground);background:var(--vscode-sideBar-background)}.shell{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}.tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.tab{height:38px;border-radius:0;background:transparent;color:var(--vscode-foreground)}.tab.active{box-shadow:inset 0 -2px var(--vscode-focusBorder);background:var(--vscode-list-hoverBackground)}.panel{display:none!important;min-height:0;overflow:hidden}.panel.active{display:block!important}.sidebar{overflow-y:auto;padding:8px}.chat{min-width:0;height:100%}.chat.active{display:grid!important;grid-template-rows:auto minmax(0,1fr) auto auto}.modelbar{display:flex;gap:6px;padding:8px 10px 0}.modelbtn{flex:1;height:28px;padding:0 8px;border-radius:4px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);cursor:pointer}.modelbtn.active{background:var(--vscode-button-background);color:var(--vscode-button-foreground);border-color:var(--vscode-button-background)}.modelbtn:disabled{opacity:.55;cursor:default}.messages{min-height:0;overflow-y:auto;padding:12px 10px}.message{margin:8px 0;padding:8px;border-radius:6px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.user{background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);margin-left:12px}.assistant{border-left:2px solid var(--vscode-focusBorder)}button{border:0;border-radius:4px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}.new{width:100%;min-height:36px;height:auto;margin-bottom:8px;padding:8px 6px;line-height:18px;white-space:normal}.conversation{display:block;width:100%;min-height:36px;height:auto;text-align:left;margin:3px 0;padding:7px 8px;background:transparent;color:var(--vscode-sideBar-foreground);white-space:normal;overflow-wrap:anywhere;line-height:16px}.conversation.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.conversation-row{display:flex;align-items:stretch;gap:4px}.conversation-row .conversation{flex:1;min-width:0}.delete-conversation{flex:0 0 24px;width:24px;height:24px;margin-top:6px;padding:0;line-height:22px;background:transparent;color:var(--vscode-descriptionForeground)}.delete-conversation:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.composer{display:flex;align-items:flex-end;gap:8px;padding:8px;border-top:1px solid var(--vscode-panel-border)}textarea{resize:none;flex:1;min-width:0;min-height:40px;padding:8px;border:1px solid var(--vscode-input-border);background:var(--vscode-input-background);color:var(--vscode-input-foreground);font:inherit}.send{flex:0 0 58px;width:58px;height:40px;padding:0;line-height:40px}.send:disabled{cursor:default;opacity:.55}.loading{opacity:.7}.queuebar{border-top:1px solid var(--vscode-panel-border);padding:6px 8px;max-height:120px;overflow-y:auto}.queue-head{display:flex;align-items:center;gap:6px;margin-bottom:4px}.queue-title{flex:1;font-weight:600;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.queue-action{flex:0 0 auto;height:22px;padding:0 8px;line-height:22px;font-size:11px;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);color:var(--vscode-input-foreground)}.queue-action:hover{background:var(--vscode-list-hoverBackground)}.queue-action.stop{color:var(--vscode-errorForeground)}.queue-item{display:flex;align-items:center;gap:6px;padding:3px 0}.queue-text{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--vscode-foreground)}.queue-del{flex:0 0 20px;width:20px;height:20px;padding:0;line-height:18px;background:transparent;color:var(--vscode-descriptionForeground);font-size:12px}.queue-del:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.queue-empty{color:var(--vscode-descriptionForeground);font-style:italic}@media(max-width:280px){.composer{gap:4px;padding:6px}.send{flex-basis:48px;width:48px}}
+        </style></head><body><div class="shell"><nav class="tabs" aria-label="Coding Agent views"><button class="tab" id="historyTab">History</button><button class="tab active" id="chatTab">Chat</button></nav><aside class="panel sidebar" id="historyPanel"><button class="new" id="new">+ New chat</button><div id="history"></div></aside><main class="panel chat active" id="chatPanel"><div class="modelbar"><button class="modelbtn" id="modelDeepseek">DeepSeek</button><button class="modelbtn" id="modelGlm">GLM</button></div><div class="messages" id="messages"></div><div class="composer"><textarea id="input" rows="1" placeholder="Message DeepSeek Coding Agent"></textarea><button class="send" id="send">Send</button></div><div class="queuebar" id="queuebar"><div class="queue-head"><span class="queue-title" id="queueTitle">Queue (0)</span><button class="queue-action" id="clearQueue">Clear all</button><button class="queue-action stop" id="stopQueue">Stop</button></div><div id="queue"></div></div></main></div><script>
+        const vscode=acquireVsCodeApi();let state={conversations:[],activeId:'',loading:false,queue:[],processing:false,stopping:false};const messages=document.getElementById('messages'),history=document.getElementById('history'),input=document.getElementById('input'),send=document.getElementById('send'),chatTab=document.getElementById('chatTab'),historyTab=document.getElementById('historyTab'),chatPanel=document.getElementById('chatPanel'),historyPanel=document.getElementById('historyPanel'),modelDeepseek=document.getElementById('modelDeepseek'),modelGlm=document.getElementById('modelGlm'),queueEl=document.getElementById('queue'),queueTitle=document.getElementById('queueTitle'),clearQueueBtn=document.getElementById('clearQueue'),stopQueueBtn=document.getElementById('stopQueue');modelDeepseek.onclick=()=>{if(state.provider!=='deepseek')vscode.postMessage({type:'setProvider',provider:'deepseek'})};modelGlm.onclick=()=>{if(state.provider!=='glm')vscode.postMessage({type:'setProvider',provider:'glm'})};function selectTab(tab){const showChat=tab==='chat';chatTab.classList.toggle('active',showChat);historyTab.classList.toggle('active',!showChat);chatPanel.classList.toggle('active',showChat);historyPanel.classList.toggle('active',!showChat)}chatTab.onclick=()=>selectTab('chat');historyTab.onclick=()=>selectTab('history');document.getElementById('new').onclick=()=>{vscode.postMessage({type:'new'});selectTab('chat')};send.onclick=()=>{const text=input.value.trim();if(!text)return;input.value='';vscode.postMessage({type:'send',text})};input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send.click()}};clearQueueBtn.onclick=()=>vscode.postMessage({type:'clearQueue'});stopQueueBtn.onclick=()=>vscode.postMessage({type:'stopQueue'});function renderQueue(){queueEl.replaceChildren();const list=state.queue||[];queueTitle.textContent='Queue ('+list.length+')';if(list.length===0){const empty=document.createElement('div');empty.className='queue-empty';empty.textContent='No queued prompts.';queueEl.appendChild(empty)}else{for(const item of list){const row=document.createElement('div');row.className='queue-item';const text=document.createElement('span');text.className='queue-text';text.textContent=item.text;text.title=item.text;const del=document.createElement('button');del.className='queue-del';del.textContent='x';del.title='Remove from queue';del.setAttribute('aria-label','Remove from queue');del.onclick=()=>vscode.postMessage({type:'deleteQueueItem',id:item.id});row.appendChild(text);row.appendChild(del);queueEl.appendChild(row)}}stopQueueBtn.disabled=list.length===0&&!state.processing}addEventListener('message',event=>{if(event.data.type!=='state')return;state=event.data;modelDeepseek.classList.toggle('active',state.provider!=='glm');modelGlm.classList.toggle('active',state.provider==='glm');history.replaceChildren();for(const conversation of state.conversations||[]){const row=document.createElement('div');row.className='conversation-row';const button=document.createElement('button');button.className='conversation'+(conversation.id===state.activeId?' active':'');button.textContent=conversation.title;button.title=conversation.title;button.onclick=()=>{vscode.postMessage({type:'open',id:conversation.id});selectTab('chat')};const remove=document.createElement('button');remove.className='delete-conversation';remove.textContent='x';remove.title='Delete conversation';remove.setAttribute('aria-label','Delete conversation');remove.onclick=()=>vscode.postMessage({type:'delete',id:conversation.id});row.appendChild(button);row.appendChild(remove);history.appendChild(row)}const conversation=(state.conversations||[]).find(item=>item.id===state.activeId)||(state.conversations&&state.conversations[0]);messages.replaceChildren();for(const message of conversation?conversation.messages:[]){const element=document.createElement('div');element.className='message '+message.role;element.textContent=message.content;messages.appendChild(element)}if(state.processing){const element=document.createElement('div');element.className='message assistant loading';element.textContent='Thinking...';messages.appendChild(element)}renderQueue();messages.scrollTop=messages.scrollHeight});vscode.postMessage({type:'ready'});
         </script></body></html>`;
     }
 }
@@ -688,6 +796,17 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 const apiKey = await context.secrets.get(API_KEY_SECRET);
                 const currentModel = config.get<string>('model', 'deepseek-v4-pro');
+                // The model check is DeepSeek-specific: it queries DeepSeek's
+                // public /models endpoint. If the configured DeepSeek "model"
+                // setting was set to a GLM id (e.g. the user typed "glm-5.3"
+                // while on the DeepSeek tab), the DeepSeek API rejects it with
+                // "The supported API model names are ... but you passed glm-5.3".
+                // Skip the check entirely in that case, and also when the user
+                // is currently using the GLM provider.
+                const activeProvider = context.workspaceState.get<string>(PROVIDER_KEY);
+                if (isLikelyGlmModelId(currentModel) || activeProvider === 'glm') {
+                    return;
+                }
                 const latest = await checkLatestModel(apiKey, currentModel);
                 if (latest.id && latest.id !== currentModel) {
                     const details = latest.version ? ` (${latest.version})` : '';
