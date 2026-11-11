@@ -17,9 +17,9 @@ describe('GLM provider helpers', () => {
         assert.equal(cfg.openAIStyle, true);
     });
 
-    it('normalizes invented glm-5.3 down to a real model id', () => {
-        assert.equal(normalizeGlmModel('glm-5.3'), 'glm-5');
-        assert.equal(normalizeGlmModel('glm-5.9'), 'glm-5');
+    it('normalizes and trims GLM model ids', () => {
+        assert.equal(normalizeGlmModel('glm-5.3'), 'glm-5.3');
+        assert.equal(normalizeGlmModel('glm-5.3-flash'), 'glm-5.3-flash');
         assert.equal(normalizeGlmModel(' GLM-4.6 '), 'glm-4.6');
         assert.equal(normalizeGlmModel(''), GLM_DEFAULT_MODEL);
         assert.equal(normalizeGlmModel(undefined), GLM_DEFAULT_MODEL);
@@ -29,8 +29,9 @@ describe('GLM provider helpers', () => {
     it('only allows reasoning_effort on reasoning models', () => {
         assert.ok(glmSupportsReasoningEffort('glm-5'));
         assert.ok(glmSupportsReasoningEffort('glm-5.1'));
+        assert.ok(glmSupportsReasoningEffort('glm-5.3'));
+        assert.ok(glmSupportsReasoningEffort('glm-5.3-flash'));
         assert.ok(!glmSupportsReasoningEffort('glm-4.6'));
-        assert.ok(!glmSupportsReasoningEffort('glm-5.3'));
     });
 
     it('extracts visible text, falling back to reasoning_content', () => {

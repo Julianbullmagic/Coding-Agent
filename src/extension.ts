@@ -972,8 +972,10 @@ export function activate(context: vscode.ExtensionContext) {
             };
             await context.workspaceState.update('codingAgent.conversations', [repairConversation, ...conversations]);
         } catch (error) {
-            // The repair itself failed; record it but do not loop.
-            await recordError(context, 'unknown', error);
+            // The repair itself failed; record it but do not loop. Classify the
+            // error so provider-specific failures (e.g. GLM timeouts) are filed
+            // under the right source and can be resolved by a later success.
+            await recordError(context, classifySource(error), error);
         }
     };
 
