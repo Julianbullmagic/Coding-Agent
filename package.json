@@ -93,6 +93,21 @@
                     "type": "boolean",
                     "default": true,
                     "description": "At the start of each session, automatically feed previously recorded errors back to the agent so it can attempt to fix its own errors."
+                },
+                "codingAgent.searxngBaseUrl": {
+                    "type": "string",
+                    "default": "http://localhost:8080",
+                    "description": "Base URL of the local SearXNG instance used by the search_searxng tool."
+                },
+                "codingAgent.autoStartSearxng": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically start the bundled local SearXNG service (via Docker) when the extension opens."
+                },
+                "codingAgent.autoInstallDocker": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "On Windows, automatically install Docker Desktop via winget if it is missing when SearXNG auto-start is enabled."
                 }
             }
         },

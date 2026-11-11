@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { CodingAgent } from './agent';
-// import { ensureLocalSearxng } from './searxng'; // SearXNG disabled: using DeepSeek web_search
+import { ensureLocalSearxng } from './searxng';
 import { checkLatestModel, isLikelyGlmModelId } from './model-check';
 import { createGitHubStatusBar } from './github';
 import { backupWorkspaceToGitHub, isGitHubCliInstalled, isGitHubAuthenticated } from './backup';
@@ -827,29 +827,29 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })();
     }
-    // if (config.get<boolean>('autoStartSearxng', true)) {
-//         const searxngBaseUrl = config.get<string>('searxngBaseUrl', 'http://localhost:8080');
-//         void vscode.window.withProgress(
-//             {
-//                 location: vscode.ProgressLocation.Notification,
-//                 title: 'Starting local SearXNG if needed',
-//                 cancellable: false,
-//             },
-//             async () => {
-//                 try {
-//                     const started = await ensureLocalSearxng(context, searxngBaseUrl);
-//                     if (started) {
-//                         void vscode.window.showInformationMessage('Local SearXNG is ready for web searches.');
-//                     }
-//                 } catch (error) {
-//                     const message = error instanceof Error ? error.message : 'Unknown startup error';
-//                     void vscode.window.showWarningMessage(
-//                         `Could not auto-start SearXNG: ${message}. DeepSeek web search is still available.`,
-//                     );
-//                 }
-//             },
-//         );
-//     }
+    if (config.get<boolean>('autoStartSearxng', true)) {
+        const searxngBaseUrl = config.get<string>('searxngBaseUrl', 'http://localhost:8080');
+        void vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Starting local SearXNG if needed',
+                cancellable: false,
+            },
+            async () => {
+                try {
+                    const started = await ensureLocalSearxng(context, searxngBaseUrl);
+                    if (started) {
+                        void vscode.window.showInformationMessage('Local SearXNG is ready for web searches.');
+                    }
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : 'Unknown startup error';
+                    void vscode.window.showWarningMessage(
+                        `Could not auto-start SearXNG: ${message}. DeepSeek web search is still available.`,
+                    );
+                }
+            },
+        );
+    }
 
     const loginGitHub = vscode.commands.registerCommand('codingAgent.loginGitHub', async () => {
         const workspacePath = detectWorkspaceFolder()?.uri.fsPath;

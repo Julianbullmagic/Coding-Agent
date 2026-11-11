@@ -29,7 +29,10 @@ function isResponding(url: URL): Promise<boolean> {
         const endpoint = new URL('/', url);
         const onResponse = (response: http.IncomingMessage) => {
             response.resume();
-            resolve((response.statusCode ?? 500) < 500);
+            // Only treat 2xx/3xx/4xx as "responding". A 5xx means the server
+            // is configured but not actually serving, which should read as
+            // "not ready" so we keep waiting / report accurately.
+            resolve((response.statusCode ?? 0) >= 200 && (response.statusCode ?? 0) < 500);
         };
         const request = endpoint.protocol === 'https:'
             ? https.get(endpoint, onResponse)
@@ -43,7 +46,6 @@ function getDockerCli(): string {
     if (process.platform === 'win32') {
         const candidates = [
             process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe'),
-            process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Docker', 'Docker', 'docker.exe'),
             process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Docker', 'resources', 'bin', 'docker.exe'),
         ].filter((candidate): candidate is string => Boolean(candidate));
         const installedCli = candidates.find(existsSync);
@@ -90,6 +92,7 @@ function getDockerDesktopPath(): string | undefined {
     }
     const candidates = [
         process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Docker', 'Docker', 'Docker Desktop.exe'),
+        process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Docker', 'Docker', 'Docker Desktop.exe'),
         process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Docker', 'Docker', 'Docker Desktop.exe'),
     ].filter((candidate): candidate is string => Boolean(candidate));
     return candidates.find(existsSync);
@@ -172,12 +175,58 @@ async function ensureDockerEngine(): Promise<void> {
     throw new Error('Docker Desktop started but the Docker engine did not become ready within 120 seconds.');
 }
 
-function runDockerCompose(extensionPath: string, secret: string): Promise<void> {
+async function runDockerCompose(extensionPath: string, secret: string): Promise<void> {
     const composeFile = path.join(extensionPath, 'docker-compose.yml');
-    return runDockerCommand(
-        ['compose', '-f', composeFile, 'up', '-d'],
-        { ...process.env, SEARXNG_SECRET: secret },
-    );
+    const composeEnv = { ...process.env, SEARXNG_SECRET: secret };
+
+    // Prefer the modern `docker compose` plugin. If it is absent (older
+    // installs), fall back to the legacy standalone `docker-compose` binary.
+    try {
+        await runDockerCommand(['compose', '-f', composeFile, 'up', '-d'], composeEnv);
+        return;
+    } catch (pluginError) {
+        const pluginDetail = pluginError instanceof Error ? pluginError.message : String(pluginError);
+        const pluginMissing = /is not a docker command|unknown command|Unknown command|cannot find|not found/i.test(pluginDetail);
+        if (!pluginMissing) {
+            throw pluginError;
+        }
+    }
+
+    try {
+        await runDockerCommand(['-f', composeFile, 'up', '-d'], {
+            ...composeEnv,
+        });
+    } catch (legacyError) {
+        // Rewrite the legacy invocation as docker-compose for the final attempt.
+        await runDockerComposeBinary(composeFile, secret, legacyError);
+    }
+}
+
+async function runDockerComposeBinary(composeFile: string, secret: string, legacyError: unknown): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        const proc = spawn('docker-compose', ['-f', composeFile, 'up', '-d'], {
+            env: { ...process.env, SEARXNG_SECRET: secret },
+            stdio: ['ignore', 'ignore', 'pipe'],
+            windowsHide: true,
+        });
+        let errorOutput = '';
+        proc.stderr?.on('data', (chunk: Buffer | string) => {
+            errorOutput += chunk.toString();
+            errorOutput = errorOutput.slice(-4000);
+        });
+        proc.once('error', () => {
+            const detail = legacyError instanceof Error ? legacyError.message : String(legacyError);
+            reject(new Error(`Neither 'docker compose' nor 'docker-compose' is available. ${detail}`));
+        });
+        proc.once('close', (code) => {
+            if (code === 0) {
+                resolve();
+            } else {
+                const detail = legacyError instanceof Error ? legacyError.message : String(legacyError);
+                reject(new Error(errorOutput.trim() || detail || `docker-compose exited with code ${code ?? 'unknown'}.`));
+            }
+        });
+    });
 }
 
 function delay(milliseconds: number): Promise<void> {

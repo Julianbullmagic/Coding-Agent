@@ -25,11 +25,11 @@ describe('DeepSeek request helpers', () => {
         assert.ok(request.tools.some((tool) => tool.name === 'retrieve_relevant_context'));
     });
 
-    it('does not expose the SearXNG tool (disabled)', () => {
+    it('exposes the SearXNG tool for explicit SearXNG searches', () => {
         const request = JSON.parse(buildRequestBody('Explain this function')) as {
             tools: Array<{ type: string; name?: string }>;
         };
-        assert.ok(!request.tools.some((tool) => tool.name === 'search_searxng'));
+        assert.ok(request.tools.some((tool) => tool.name === 'search_searxng'));
     });
 
     it('trims whitespace from prompts', () => {

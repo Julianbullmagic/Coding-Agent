@@ -336,6 +336,17 @@ export function interpretGlmError(message: string): string {
 export const GLM_TOOL_DEFINITIONS: GlmToolDefinition[] = toGlmTools([
     {
         type: 'function',
+        name: 'search_searxng',
+        description: 'Search a local SearXNG metasearch instance by query. Use this only when the user explicitly asks to search SearXNG; otherwise use the default DeepSeek web_search instead.',
+        parameters: {
+            type: 'object',
+            properties: { query: { type: 'string', description: 'The search query to run against SearXNG.' } },
+            required: ['query'],
+            additionalProperties: false,
+        },
+    },
+    {
+        type: 'function',
         name: 'retrieve_relevant_context',
         description: 'Retrieve relevant context from earlier conversations in this workspace. Use this when the user refers back to something previously discussed or explicitly asks you to recall prior information.',
         parameters: {
