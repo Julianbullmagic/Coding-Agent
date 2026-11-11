@@ -589,11 +589,6 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
     // Execute a single queued prompt against the agent and append the result to
     // the conversation it belonged to when it was enqueued.
     private async runOne(view: vscode.WebviewView, item: PromptQueueItem): Promise<void> {
-        const conversation = this.active();
-        if (!conversation) {
-            await this.createConversation();
-        }
-
         const pendingUpdate = this.context.globalState.get<{
             modelId: string;
             version: string;
