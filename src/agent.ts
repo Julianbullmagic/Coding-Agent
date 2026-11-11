@@ -18,6 +18,8 @@ import {
     glmSupportsReasoningEffort,
     interpretGlmError,
     GLM_DEFAULT_MODEL,
+    GLM_FLASH_FALLBACK_MODEL,
+    isGlmFlagship53,
 } from './providers';
 
 interface ResponseOutputItem {
@@ -352,7 +354,7 @@ function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
         const request = url.protocol === 'https:'
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
-        request.setTimeout(180_000, () => request.destroy(new Error('Web request timed out.')));
+        request.setTimeout(300_000, () => request.destroy(new Error('Web request timed out.')));
         request.on('error', reject);
         request.end(body);
     });
@@ -784,6 +786,10 @@ export class CodingAgent {
     ): Promise<string> {
         const normalizedMaxToolRounds = Math.max(1, Math.min(1000, Math.floor(maxToolRounds)));
         const cfg = resolveProvider('glm', this.glmModelId);
+        // The model id actually being requested this turn. If it is the
+        // flagship glm-5.3 and the request times out, we swap in the fast
+        // glm-5.3-flash substitute on the next attempt.
+        let activeModel = cfg.model;
         const endpoint = new URL(cfg.endpoint);
 
         type GLMMessage = { role: string; content: string | null; tool_calls?: GlmToolCall[]; tool_call_id?: string };
@@ -796,27 +802,44 @@ export class CodingAgent {
         ];
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
-            const glmBody: Record<string, unknown> = {
-                model: cfg.model,
-                messages,
-                max_tokens: 8192,
-                tools: GLM_TOOL_DEFINITIONS,
-                tool_choice: 'auto',
-            };
-            if (glmSupportsReasoningEffort(cfg.model)) {
-                glmBody.reasoning_effort = GLM_REASONING_EFFORT;
-            }
-            const requestBody: string = JSON.stringify(glmBody);
             let response: GlmCompletionResponse;
-            try {
-                response = await requestJson<GlmCompletionResponse>(
-                    endpoint,
-                    requestBody,
-                    apiKey,
-                );
-            } catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                throw new Error(interpretGlmError(detail));
+            let attempts = 0;
+            // Allow one retry, and allow a fallback from the slow flagship
+            // glm-5.3 to the fast glm-5.3-flash when the request times out.
+            while (true) {
+                const glmBody: Record<string, unknown> = {
+                    model: activeModel,
+                    messages,
+                    max_tokens: 8192,
+                    tools: GLM_TOOL_DEFINITIONS,
+                    tool_choice: 'auto',
+                };
+                if (glmSupportsReasoningEffort(activeModel)) {
+                    glmBody.reasoning_effort = GLM_REASONING_EFFORT;
+                }
+                const requestBody: string = JSON.stringify(glmBody);
+                try {
+                    response = await requestJson<GlmCompletionResponse>(
+                        endpoint,
+                        requestBody,
+                        apiKey,
+                    );
+                    break;
+                } catch (error) {
+                    const detail = error instanceof Error ? error.message : String(error);
+                    // Only timeouts are worth retrying/fallback; hard errors
+                    // (auth, quota, unknown model) should surface immediately.
+                    const isTimeout = /timed out|timeout/i.test(detail);
+                    if (isTimeout && isGlmFlagship53(activeModel)) {
+                        activeModel = GLM_FLASH_FALLBACK_MODEL;
+                        continue;
+                    }
+                    if (isTimeout) {
+                        attempts += 1;
+                        if (attempts < 2) continue;
+                    }
+                    throw new Error(interpretGlmError(detail));
+                }
             }
             const choice = response.choices?.[0];
             const message = choice?.message;

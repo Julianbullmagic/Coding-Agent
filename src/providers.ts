@@ -22,7 +22,7 @@ export type Provider = 'deepseek' | 'glm';
 export interface ProviderConfig {
     /** Endpoint the agent should POST chat requests to. */
     endpoint: string;
-    /** Model id to send in the request body (e.g. `deepseek-v4-pro` or `glm-4.6`). */
+    /** Model id to send in the request body (e.g. `deepseek-v4-pro` or `glm-5.3-flash`). */
     model: string;
     /** True when the provider uses the Chat Completions (OpenAI) format. */
     openAIStyle: boolean;
@@ -36,38 +36,52 @@ export const GLM_API_ENDPOINT = 'https://api.z.ai/api/paas/v4/chat/completions';
 
 // The default GLM model for the z.ai international platform.
 //
-// NOTE: z.ai serves the GLM model family under ids such as `glm-4.5`,
-// `glm-4.6`, `glm-4.7`, `glm-5`, `glm-5.1`, `glm-5.2`, and their `flash`
-// variants. There is no `glm-5.3` id on z.ai; the flagship 5.x models are
-// simply named `glm-5`, `glm-5.1`, etc. `glm-4.6` is a reliable general
-// purpose default that works without a coding-plan subscription.
-export const GLM_DEFAULT_MODEL = 'glm-4.6';
+// `glm-5.3-flash` is the fast variant of the glm-5.3 flagship. It uses only a
+// small active slice of the model (18B active of 320B total), so it returns
+// quickly and is far less likely to hit the request timeout than the 743B
+// `glm-5.3` flagship. We default to it so a fresh install does not hard-fail
+// on a slow/cold flagship model.
+export const GLM_DEFAULT_MODEL = 'glm-5.3-flash';
+
+// The fast fallback used when the flagship glm-5.3 times out. This is the
+// "substitute" model to swap in when the full-size model is unavailable or
+// too slow to answer within the timeout.
+export const GLM_FLASH_FALLBACK_MODEL = 'glm-5.3-flash';
 
 // Reasoning effort for GLM 5.x reasoning models (low/medium/high/max).
-// `glm-4.6` and other non-reasoning models ignore or reject this field, so
-// it is only attached when the selected model is a reasoning variant.
+// Non-reasoning models ignore or reject this field, so it is only attached
+// when the selected model is a reasoning variant.
 export const GLM_REASONING_EFFORT = 'medium' as const;
 
 // Models that support the `reasoning_effort` request field on z.ai.
-const GLM_REASONING_MODELS: ReadonlySet<string> = new Set(['glm-5', 'glm-5.1', 'glm-5.2']);
+const GLM_REASONING_MODELS: ReadonlySet<string> = new Set([
+    'glm-5',
+    'glm-5.1',
+    'glm-5.2',
+    'glm-5.3',
+    'glm-5.3-flash',
+    'glm-5.3-flashx',
+]);
 
 /**
  * Normalize a user-supplied GLM model id into a value that z.ai actually
  * accepts. This handles a few real-world problems:
  *
- *  - Tentative/pinned ids that never existed on z.ai (e.g. `glm-5.3`).
- *  - Whitespace/casing from a hand-edited setting.
+ *  - Whitespace/casing from a hand-edited setting (lowercased).
+ *  - Malformed ids that do not match the `glm-<major>[.<minor>][-<variant>]`
+ *    shape are replaced with the fallback.
  *
- * If the id is not recognized at all, fall back to the given default so the
- * request does not hard-fail on a typo.
+ * Valid glm-5.x ids (including `glm-5.3` and `glm-5.3-flash`) are passed
+ * through unchanged.
  */
 export function normalizeGlmModel(modelId: string | undefined, fallback: string = GLM_DEFAULT_MODEL): string {
     const id = (modelId ?? '').trim().toLowerCase();
     if (!id) return fallback;
 
     // A valid glm-<major>.<minor>[-<variant>] token. z.ai ids are only ever
-    // `glm-<major>[.<minor>]` plus an optional `-flash`/`-air`/`-turbo`/`-v`
-    // suffix. Anything outside this shape is treated as a typo and replaced.
+    // `glm-<major>[.<minor>]` plus an optional `-flash`/`-flashx`/`-air`/
+    // `-turbo`/`-v` suffix. Anything outside this shape is treated as a typo
+    // and replaced with the fallback.
     const match = /^glm-(\d+)(?:\.(\d+))?(-[a-z0-9]+)?$/.exec(id);
     if (!match) return fallback;
 
@@ -75,16 +89,6 @@ export function normalizeGlmModel(modelId: string | undefined, fallback: string 
     const minorRaw = match[2] ?? '';
     const variant = match[3] ?? '';
 
-    // The 5.x flagship reasoning models on z.ai are named `glm-5`, `glm-5.1`,
-    // `glm-5.2`, etc. There is no `glm-5.3`. Remap any invented 5.x minor
-    // (5.3 and beyond) down to the known flagship `glm-5` so a stale setting
-    // doesn't hard-fail.
-    if (major >= 5 && minorRaw && Number(minorRaw) >= 3) {
-        return 'glm-5' + variant;
-    }
-
-    // Everything else is returned normalized to lowercase (e.g. `glm-4.6`,
-    // `glm-4.7-flash`).
     return 'glm-' + major + (minorRaw ? '.' + minorRaw : '') + variant;
 }
 
@@ -115,6 +119,15 @@ export function resolveProvider(provider: Provider, modelId?: string): ProviderC
  */
 export function glmSupportsReasoningEffort(modelId: string): boolean {
     return GLM_REASONING_MODELS.has(modelId.trim().toLowerCase());
+}
+
+/**
+ * True when the given GLM model is the flagship `glm-5.3` (the slow, 743B
+ * variant that commonly triggers the request timeout). Used by the agent to
+ * decide when to swap in the `-flash` substitute.
+ */
+export function isGlmFlagship53(modelId: string): boolean {
+    return modelId.trim().toLowerCase() === 'glm-5.3';
 }
 
 export const GLM_MODEL_KEY = 'codingAgent.glmModel';
@@ -236,7 +249,7 @@ export function interpretGlmError(message: string): string {
             'GLM request failed: ' + raw,
             '',
             'Diagnosis: the configured GLM model id is not valid on z.ai.',
-            'Fix: set "codingAgent.glmModel" to a valid id such as glm-4.6, glm-4.7, or glm-5, then reload the window.',
+            'Fix: set "codingAgent.glmModel" to a valid id such as glm-4.6, glm-5.3, or glm-5.3-flash, then reload the window.',
         ].join('\n');
     }
 
@@ -246,7 +259,7 @@ export function interpretGlmError(message: string): string {
             'GLM request failed: ' + raw,
             '',
             'Diagnosis: the z.ai account has run out of quota or balance for this model.',
-            'Fix: top up the account or switch to a cheaper model (e.g. glm-4.6) via the "codingAgent.glmModel" setting.',
+            'Fix: top up the account or switch to a cheaper model (e.g. glm-5.3-flash) via the "codingAgent.glmModel" setting.',
         ].join('\n');
     }
 
@@ -255,7 +268,7 @@ export function interpretGlmError(message: string): string {
             'GLM request failed: ' + raw,
             '',
             'Diagnosis: z.ai did not respond within the timeout.',
-            'Fix: retry the request. If it keeps timing out, try a smaller prompt or a faster model (e.g. glm-4.6).',
+            'Fix: retry the request. If it keeps timing out, use a faster model (e.g. glm-5.3-flash), which the agent will now attempt automatically.',
         ].join('\n');
     }
 
