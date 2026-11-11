@@ -2,7 +2,7 @@
     "name": "coding-agent-extension",
     "displayName": "Coding Agent Extension",
     "description": "A DeepSeek coding assistant with web search and GitHub backup.",
-    "version": "0.3.8",
+    "version": "0.3.9",
     "publisher": "your-name",
     "engines": {
         "vscode": "^1.90.0"
@@ -64,7 +64,7 @@
                 },
                 "codingAgent.glmModel": {
                     "type": "string",
-                    "default": "glm-4.6",
+                    "default": "glm-5.3-flash",
                     "description": "GLM (Z.AI / Zhipu AI) model used by the extension when the GLM provider is selected."
                 },
                 "codingAgent.autoCheckModelUpdates": {
