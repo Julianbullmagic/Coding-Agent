@@ -1,5 +1,5 @@
 import { strict as assert } from 'assert';
-import { isLikelyGlmModelId, checkLatestModel } from '../src/model-check';
+import { isLikelyGlmModelId, checkLatestModel, describeNetworkError } from '../src/model-check';
 
 describe('model-check model-id guard', () => {
     it('recognizes GLM model ids', () => {
@@ -30,5 +30,34 @@ describe('checkLatestModel GLM short-circuit', () => {
         // network request is attempted.
         const result = await checkLatestModel(undefined, 'glm-5.3');
         assert.deepEqual(result, { id: 'glm-5.3', name: 'glm-5.3', version: '' });
+    });
+});
+
+describe('describeNetworkError', () => {
+    function errno(code: string, message: string): NodeJS.ErrnoException {
+        return Object.assign(new Error(message), { code });
+    }
+
+    it('wraps an ENOTFOUND DNS failure with a readable diagnosis and host', () => {
+        const error = errno('ENOTFOUND', 'getaddrinfo ENOTFOUND api.deepseek.com');
+        const described = describeNetworkError(error, 'Model check request failed');
+        assert.ok(described.message.startsWith('Model check request failed'));
+        assert.ok(described.message.includes('deepseek.com'), 'should name the host');
+        assert.ok(described.message.toLowerCase().includes('dns'), 'should mention DNS');
+        assert.ok(described.message.toLowerCase().includes('check your internet connection'));
+    });
+
+    it('wraps ECONNREFUSED as a connection failure', () => {
+        const error = errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:8080');
+        const described = describeNetworkError(error, 'Request failed');
+        assert.ok(described.message.toLowerCase().includes('refused'));
+        assert.ok(described.message.includes('Request failed'));
+    });
+
+    it('preserves a recognizable prefix so classifySource can file it correctly', () => {
+        const error = errno('ENOTFOUND', 'getaddrinfo ENOTFOUND api.deepseek.com');
+        const described = describeNetworkError(error, 'Model check request failed');
+        // classifySource in self-heal.ts keys off this exact prefix.
+        assert.ok(described.message.includes('Model check request failed'));
     });
 });

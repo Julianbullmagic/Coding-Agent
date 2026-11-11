@@ -4,6 +4,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import { RagConversation, retrieveRelevantContext as retrieveRag } from './rag';
+import { describeNetworkError } from './model-check';
 import type { CalendarToolArgs } from './google-calendar';
 import type { GmailToolArgs } from './gmail';
 import type { BusinessToolArgs } from './business-reviews';
@@ -369,7 +370,14 @@ function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
         request.setTimeout(300_000, () => request.destroy(new Error('Web request timed out.')));
-        request.on('error', reject);
+        request.on('error', (error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/timed out|timeout/i.test(message)) {
+                reject(new Error('Web request timed out.'));
+                return;
+            }
+            reject(describeNetworkError(error, url.hostname ? `Request to ${url.hostname} failed` : 'Request failed'));
+        });
         request.end(body);
     });
 }

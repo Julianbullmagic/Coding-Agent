@@ -35,6 +35,57 @@ export function isLikelyGlmModelId(modelId: string | undefined): boolean {
     return /^(glm|z?-ai|zhipu|chatglm)[\d-]/.test(id) || id.startsWith('glm');
 }
 
+/**
+ * Turn a low-level Node DNS / TCP / TLS error into a readable diagnostic so a
+ * raw `getaddrinfo ENOTFOUND api.deepseek.com` (or similar) never reaches the
+ * user or the self-heal log unhelpfully. Node surfaces these as `Error` objects
+ * whose `code` is one of the well-known libuv/system error codes.
+ *
+ * The returned string is prefixed so `classifySource` (src/self-heal.ts) can
+ * still recognize the producing subsystem, and includes the host that failed
+ * plus a concrete next step (check the network / DNS, try again later).
+ */
+export function describeNetworkError(error: unknown, label: string): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
+        ? (error as NodeJS.ErrnoException).code
+        : '';
+    const host = (error instanceof Error && typeof (error as NodeJS.ErrnoException & { hostname?: string }).hostname === 'string')
+        ? (error as NodeJS.ErrnoException & { hostname?: string }).hostname
+        : extractHostname(message);
+
+    const lower = message.toLowerCase();
+    let diagnosis: string;
+    if (lower.includes('enotfound') || lower.includes('eai_again') || lower.includes('eai_noname') || lower.includes('getaddrinfo')) {
+        diagnosis = 'could not resolve the host name (DNS lookup failed).';
+    } else if (lower.includes('econnrefused')) {
+        diagnosis = 'could not connect (the server refused the connection).';
+    } else if (lower.includes('etimedout') || lower.includes('timed out') || lower.includes('timeout')) {
+        diagnosis = 'did not respond within the allowed time.';
+    } else if (lower.includes('econnreset') || lower.includes('epipe')) {
+        diagnosis = 'the connection was reset while waiting for a response.';
+    } else if (lower.includes('cert') || lower.includes('ssl') || lower.includes('tls') || lower.includes('uNABLE_TO_VERIFY')) {
+        diagnosis = 'the TLS certificate could not be verified.';
+    } else {
+        diagnosis = 'the network request failed.';
+    }
+
+    const hostPart = host ? ` while reaching ${host}` : '';
+    return new Error(
+        `${label}${hostPart}: ${diagnosis} (${message}). Check your internet connection and DNS, then try again.`,
+    );
+}
+
+function extractHostname(rawMessage: string): string {
+    const match = rawMessage.match(/\b(?:getaddrinfo\s+)?(?:ENOTFOUND|EAI_[A-Z]+)\s+([^\s,;]+)/i);
+    if (match && match[1] && !/^ENOTFOUND$/i.test(match[1])) {
+        return match[1].replace(/[^\w.-]/g, '');
+    }
+    const hostMatch = rawMessage.match(/^([a-z0-9.-]+\.[a-z]{2,})/i)
+        ?? rawMessage.match(/(?:connect|lookup)\s+\b([a-z0-9.-]+\.[a-z]{2,})/i);
+    return hostMatch ? hostMatch[1] : '';
+}
+
 function requestText(url: URL, apiKey?: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
         const headers: http.OutgoingHttpHeaders = { Accept: 'application/json,text/html,*/*' };
@@ -72,7 +123,19 @@ function requestText(url: URL, apiKey?: string): Promise<string> {
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
         request.setTimeout(180_000, () => request.destroy(new Error('Model check request timed out.')));
-        request.on('error', reject);
+        request.on('error', (error) => {
+            // A low-level socket/DNS failure such as `getaddrinfo ENOTFOUND
+            // api.deepseek.com` used to reject with the raw Node message, which
+            // neither the user nor the self-heal log could act on. Wrap it so
+            // the "Model check request failed" prefix is preserved (letting
+            // classifySource file it under model-check) and the actual cause is
+            // described. The request timeout above already has its own message.
+            if (/timed out|timeout/i.test(error instanceof Error ? error.message : String(error))) {
+                reject(new Error('Model check request timed out.'));
+                return;
+            }
+            reject(describeNetworkError(error, 'Model check request failed'));
+        });
         request.end();
     });
 }
