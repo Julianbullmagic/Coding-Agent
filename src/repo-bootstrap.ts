@@ -84,6 +84,9 @@ export function nextCollisionName(base: string, attempt: number): string {
 }
 
 async function ghCreateRepo(name: string, cwd: string): Promise<void> {
+    if (!cwd || !cwd.trim()) {
+        throw new Error('Cannot create a GitHub repository without a valid workspace path.');
+    }
     await run(
         'gh',
         ['repo', 'create', name, '--source', cwd, '--remote', 'origin', '--private', '--push'],
@@ -126,6 +129,10 @@ export async function createRepoWithRetry(
  * yet backed by GitHub gets one without any manual steps.
  */
 export async function ensureRepoOnOpen(cwd: string, folderName: string): Promise<BootstrapResult> {
+    if (!cwd || !cwd.trim()) {
+        return { action: 'no-workspace', message: 'No workspace folder is open; skipping repo bootstrap.' };
+    }
+
     if (!(await isGitAuthenticated(cwd))) {
         return { action: 'not-authenticated', message: 'GitHub CLI is not authenticated; skipping repo bootstrap.' };
     }

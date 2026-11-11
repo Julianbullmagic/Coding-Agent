@@ -76,6 +76,10 @@ async function hasUncommittedChanges(cwd: string): Promise<boolean> {
  * and pushes all changes. Designed to run silently on an interval (auto-backup).
  */
 export async function backupWorkspaceToGitHub(cwd: string, repoName: string): Promise<BackupResult> {
+    if (!cwd || !cwd.trim()) {
+        return { ok: false, action: 'nothing', message: 'No workspace folder is open; cannot back up.' };
+    }
+
     if (!(await isGitHubAuthenticated(cwd))) {
         return { ok: false, action: 'nothing', message: 'GitHub CLI is not authenticated. Run "Coding Agent: Sign in to GitHub" first.' };
     }
