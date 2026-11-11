@@ -35,9 +35,15 @@ interface ReviewWithDraft {
 
 /**
  * Draft a grateful reply based on the star rating.
+ *
+ * The review objects produced by `listReviews` carry the reviewer's name in
+ * the `reviewer` field (mapped from the Business Profile API's
+ * `review.reviewer.displayName`). There is no `reviewerDisplayName` field on
+ * the normalized review shape, so we read `reviewer` (and fall back to a
+ * generic greeting) rather than referencing a field that does not exist.
  */
 function draftReply(review: { rating: number; comment?: string; reviewer?: string }): string {
-    const name = review.reviewerDisplayName || review.reviewer || 'there';
+    const name = review.reviewer || 'there';
     const firstName = name.split(' ')[0] || name;
     const commentSnippet = review.comment ? ` We appreciate you taking the time to share your thoughts.` : '';
 
