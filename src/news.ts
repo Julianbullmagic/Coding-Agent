@@ -28,16 +28,14 @@ export interface FeedResult {
 /** The default source list. Users can edit all of these in the News tab. */
 export const DEFAULT_NEWS_SOURCES: NewsSource[] = [
     { id: 'green-left', name: 'Green Left', url: 'https://www.greenleft.org.au/rss.xml' },
-    { id: 'geopolitical-economy', name: 'Geopolitical Economy Report', url: 'https://geopoliticaleconomyreport.com/feed/' },
+    { id: 'geopolitical-economy', name: 'Geopolitical Economy Report', url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCwlvSJdcMc7iGdR-aducSog' },
     { id: 'red-ant', name: 'Red Ant', url: 'https://red-ant.org/feed/' },
     { id: 'cgtn', name: 'CGTN', url: 'https://www.cgtn.com/subscribe/rss/section/world.xml' },
-    { id: 'telesur', name: 'Telesur English', url: 'https://www.telesurenglish.net/feed/' },
     { id: 'bloomberg', name: 'Bloomberg', url: 'https://feeds.bloomberg.com/markets/news.rss' },
     { id: 'breakthrough-news', name: 'Breakthrough News', url: 'https://www.breakthroughnews.org/feed/' },
     { id: 'greenwald', name: 'Glenn Greenwald', url: 'https://greenwald.substack.com/feed' },
-    { id: 'jimmy-dore', name: 'Jimmy Dore', url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC3l7FeOSi-N2vRtQXGUrLcg' },
-    { id: 'maupin', name: 'Caleb Maupin', url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCXt9Cml7dJ4SK7SJKLw5IYA' },
-    { id: 'wolff', name: 'Richard Wolff', url: 'https://www.rdwolff.com/feed' },
+    { id: 'jimmy-dore', name: 'Jimmy Dore', url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC3M7l8ved_rYQ45AVzS0RGA' },
+    { id: 'mr-online', name: 'MR Online', url: 'https://mronline.org/feed/' },
 ];
 
 export function makeSourceId(): string {
@@ -106,7 +104,7 @@ export function extractFeedItems(xml: string, limit = 4): FeedItem[] {
     return items;
 }
 
-function fetchText(url: string, timeoutMs = 10000): Promise<string> {
+function fetchText(url: string, timeoutMs = 30000): Promise<string> {
     return new Promise((resolve, reject) => {
         let parsed: URL;
         try {
@@ -144,7 +142,7 @@ function fetchText(url: string, timeoutMs = 10000): Promise<string> {
         );
         request.on('error', reject);
         request.setTimeout(timeoutMs, () => {
-            request.destroy(new Error('Feed request timed out.'));
+            request.destroy(new Error('The request timed out — try again or check the feed URL.'));
         });
     });
 }
