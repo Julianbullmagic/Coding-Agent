@@ -1,168 +1,168 @@
 {
-  "name": "coding-agent-extension",
-  "displayName": "Coding Agent Extension",
-  "description": "A DeepSeek coding assistant with web search and GitHub backup.",
-  "version": "0.3.10",
-  "publisher": "your-name",
-  "engines": {
-    "vscode": "^1.90.0"
-  },
-  "activationEvents": [
-    "onStartupFinished",
-    "onCommand:codingAgent.askDeepSeek",
-    "onCommand:codingAgent.setApiKey",
-    "onCommand:codingAgent.setGLMApiKey",
-    "onCommand:codingAgent.newConversation",
-    "onCommand:codingAgent.loginGitHub",
-    "onCommand:codingAgent.backupNow",
-    "onCommand:codingAgent.configureGoogleCalendar",
-    "onCommand:codingAgent.forgetGoogleTokens",
-    "onCommand:codingAgent.showErrorLog",
-    "onCommand:codingAgent.runSelfHeal",
-    "onCommand:codingAgent.autoReplyBusinessReviews"
-  ],
-  "main": "./out/src/extension.js",
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "test": "npm run compile && mocha ./out/test/*.test.js"
-  },
-  "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "codingAgent",
-          "title": "Coding Agent",
-          "icon": "resources/coding-agent.svg"
-        }
-      ]
+    "name": "coding-agent-extension",
+    "displayName": "Coding Agent Extension",
+    "description": "A DeepSeek coding assistant with web search and GitHub backup.",
+    "version": "0.3.11",
+    "publisher": "your-name",
+    "engines": {
+        "vscode": "^1.90.0"
     },
-    "views": {
-      "codingAgent": [
-        {
-          "type": "webview",
-          "id": "codingAgent.chat",
-          "name": "Chat"
-        }
-      ]
+    "activationEvents": [
+        "onStartupFinished",
+        "onCommand:codingAgent.askDeepSeek",
+        "onCommand:codingAgent.setApiKey",
+        "onCommand:codingAgent.setGLMApiKey",
+        "onCommand:codingAgent.newConversation",
+        "onCommand:codingAgent.loginGitHub",
+        "onCommand:codingAgent.backupNow",
+        "onCommand:codingAgent.configureGoogleCalendar",
+        "onCommand:codingAgent.forgetGoogleTokens",
+        "onCommand:codingAgent.showErrorLog",
+        "onCommand:codingAgent.runSelfHeal",
+        "onCommand:codingAgent.autoReplyBusinessReviews"
+    ],
+    "main": "./out/src/extension.js",
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "test": "npm run compile && mocha ./out/test/*.test.js"
     },
-    "configuration": {
-      "title": "Coding Agent",
-      "properties": {
-        "codingAgent.maxToolRounds": {
-          "type": "number",
-          "default": 1000,
-          "minimum": 1,
-          "maximum": 1000,
-          "description": "Maximum number of tool-operation rounds allowed for one Coding Agent turn."
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "codingAgent",
+                    "title": "Coding Agent",
+                    "icon": "resources/coding-agent.svg"
+                }
+            ]
         },
-        "codingAgent.model": {
-          "type": "string",
-          "default": "deepseek-v4-pro",
-          "description": "DeepSeek model used by the extension. The startup check may update this setting."
+        "views": {
+            "codingAgent": [
+                {
+                    "type": "webview",
+                    "id": "codingAgent.chat",
+                    "name": "Chat"
+                }
+            ]
         },
-        "codingAgent.glmModel": {
-          "type": "string",
-          "default": "glm-5.3-flash",
-          "description": "GLM (Z.AI / Zhipu AI) model used by the extension when the GLM provider is selected."
+        "configuration": {
+            "title": "Coding Agent",
+            "properties": {
+                "codingAgent.maxToolRounds": {
+                    "type": "number",
+                    "default": 1000,
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Maximum number of tool-operation rounds allowed for one Coding Agent turn."
+                },
+                "codingAgent.model": {
+                    "type": "string",
+                    "default": "deepseek-v4-pro",
+                    "description": "DeepSeek model used by the extension. The startup check may update this setting."
+                },
+                "codingAgent.glmModel": {
+                    "type": "string",
+                    "default": "glm-5.3-flash",
+                    "description": "GLM (Z.AI / Zhipu AI) model used by the extension when the GLM provider is selected."
+                },
+                "codingAgent.autoCheckModelUpdates": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Check DeepSeek documentation and update the configured model when the extension opens."
+                },
+                "codingAgent.autoBackupToGitHub": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically commit and push workspace changes to a GitHub repository on an interval. Requires an authenticated GitHub CLI (run 'Coding Agent: Sign in to GitHub')."
+                },
+                "codingAgent.autoBackupIntervalMinutes": {
+                    "type": "number",
+                    "default": 30,
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "How often (in minutes) to automatically back up the workspace to GitHub."
+                },
+                "codingAgent.promptForGitHubLogin": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show a status-bar indicator for GitHub login state and prompt to sign in when credentials are missing or expired."
+                },
+                "codingAgent.selfHeal.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "At the start of each session, automatically feed previously recorded errors back to the agent so it can attempt to fix its own errors."
+                },
+                "codingAgent.searxngBaseUrl": {
+                    "type": "string",
+                    "default": "http://localhost:8080",
+                    "description": "Base URL of the local SearXNG instance used by the search_searxng tool."
+                },
+                "codingAgent.autoStartSearxng": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically start the bundled local SearXNG service (via Docker) when the extension opens."
+                },
+                "codingAgent.autoInstallDocker": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "On Windows, automatically install Docker Desktop via winget if it is missing when SearXNG auto-start is enabled."
+                }
+            }
         },
-        "codingAgent.autoCheckModelUpdates": {
-          "type": "boolean",
-          "default": true,
-          "description": "Check DeepSeek documentation and update the configured model when the extension opens."
-        },
-        "codingAgent.autoBackupToGitHub": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically commit and push workspace changes to a GitHub repository on an interval. Requires an authenticated GitHub CLI (run 'Coding Agent: Sign in to GitHub')."
-        },
-        "codingAgent.autoBackupIntervalMinutes": {
-          "type": "number",
-          "default": 30,
-          "minimum": 1,
-          "maximum": 1440,
-          "description": "How often (in minutes) to automatically back up the workspace to GitHub."
-        },
-        "codingAgent.promptForGitHubLogin": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show a status-bar indicator for GitHub login state and prompt to sign in when credentials are missing or expired."
-        },
-        "codingAgent.selfHeal.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "At the start of each session, automatically feed previously recorded errors back to the agent so it can attempt to fix its own errors."
-        },
-        "codingAgent.searxngBaseUrl": {
-          "type": "string",
-          "default": "http://localhost:8080",
-          "description": "Base URL of the local SearXNG instance used by the search_searxng tool."
-        },
-        "codingAgent.autoStartSearxng": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically start the bundled local SearXNG service (via Docker) when the extension opens."
-        },
-        "codingAgent.autoInstallDocker": {
-          "type": "boolean",
-          "default": true,
-          "description": "On Windows, automatically install Docker Desktop via winget if it is missing when SearXNG auto-start is enabled."
-        }
-      }
+        "commands": [
+            {
+                "command": "codingAgent.askDeepSeek",
+                "title": "Coding Agent: Ask DeepSeek"
+            },
+            {
+                "command": "codingAgent.setApiKey",
+                "title": "Coding Agent: Set DeepSeek API Key"
+            },
+            {
+                "command": "codingAgent.setGLMApiKey",
+                "title": "Coding Agent: Set GLM API Key"
+            },
+            {
+                "command": "codingAgent.newConversation",
+                "title": "Coding Agent: New Conversation"
+            },
+            {
+                "command": "codingAgent.loginGitHub",
+                "title": "Coding Agent: Sign in to GitHub"
+            },
+            {
+                "command": "codingAgent.backupNow",
+                "title": "Coding Agent: Back Up to GitHub Now"
+            },
+            {
+                "command": "codingAgent.configureGoogleCalendar",
+                "title": "Coding Agent: Configure Google Calendar"
+            },
+            {
+                "command": "codingAgent.forgetGoogleTokens",
+                "title": "Coding Agent: Forget Google Tokens"
+            },
+            {
+                "command": "codingAgent.showErrorLog",
+                "title": "Coding Agent: Show Error Log"
+            },
+            {
+                "command": "codingAgent.runSelfHeal",
+                "title": "Coding Agent: Run Self-Heal Repair"
+            },
+            {
+                "command": "codingAgent.autoReplyBusinessReviews",
+                "title": "Coding Agent: Auto-Reply Google Business Reviews"
+            }
+        ]
     },
-    "commands": [
-      {
-        "command": "codingAgent.askDeepSeek",
-        "title": "Coding Agent: Ask DeepSeek"
-      },
-      {
-        "command": "codingAgent.setApiKey",
-        "title": "Coding Agent: Set DeepSeek API Key"
-      },
-      {
-        "command": "codingAgent.setGLMApiKey",
-        "title": "Coding Agent: Set GLM API Key"
-      },
-      {
-        "command": "codingAgent.newConversation",
-        "title": "Coding Agent: New Conversation"
-      },
-      {
-        "command": "codingAgent.loginGitHub",
-        "title": "Coding Agent: Sign in to GitHub"
-      },
-      {
-        "command": "codingAgent.backupNow",
-        "title": "Coding Agent: Back Up to GitHub Now"
-      },
-      {
-        "command": "codingAgent.configureGoogleCalendar",
-        "title": "Coding Agent: Configure Google Calendar"
-      },
-      {
-        "command": "codingAgent.forgetGoogleTokens",
-        "title": "Coding Agent: Forget Google Tokens"
-      },
-      {
-        "command": "codingAgent.showErrorLog",
-        "title": "Coding Agent: Show Error Log"
-      },
-      {
-        "command": "codingAgent.runSelfHeal",
-        "title": "Coding Agent: Run Self-Heal Repair"
-      },
-      {
-        "command": "codingAgent.autoReplyBusinessReviews",
-        "title": "Coding Agent: Auto-Reply Google Business Reviews"
-      }
-    ]
-  },
-  "devDependencies": {
-    "typescript": "^5.4.5",
-    "@types/vscode": "^1.90.0",
-    "mocha": "^10.4.0",
-    "@types/mocha": "^10.0.6",
-    "@types/node": "^18.19.0"
-  }
+    "devDependencies": {
+        "typescript": "^5.4.5",
+        "@types/vscode": "^1.90.0",
+        "mocha": "^10.4.0",
+        "@types/mocha": "^10.0.6",
+        "@types/node": "^18.19.0"
+    }
 }
