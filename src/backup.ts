@@ -71,6 +71,27 @@ async function hasUncommittedChanges(cwd: string): Promise<boolean> {
     return (await runOrEmpty('git', ['status', '--porcelain'], cwd)).trim() !== '';
 }
 
+async function hasCommits(cwd: string): Promise<boolean> {
+    return (await runOrEmpty('git', ['rev-parse', '--verify', 'HEAD'], cwd)) !== '';
+}
+
+/** True when gh reported that the repository name is already taken on the account. */
+function isRepoNameCollision(error: unknown): boolean {
+    return /already exists/i.test(String(error));
+}
+
+/**
+ * Ensure HEAD exists before pushing. Pushing `HEAD` from a repository with no
+ * commits fails with "error: src refspec HEAD does not match any" — this can
+ * happen when the workspace is empty and the earlier commit was skipped with
+ * "nothing to commit". An empty commit makes the push always succeed.
+ */
+async function ensureHeadForPush(cwd: string): Promise<void> {
+    if (!(await hasCommits(cwd))) {
+        await run('git', ['commit', '--allow-empty', '-m', 'chore(backup): initial empty commit'], cwd);
+    }
+}
+
 /**
  * Create a private GitHub repository and wire it up as the workspace's `origin`
  * remote, then push. We deliberately do NOT use `gh repo create --source/
@@ -82,27 +103,40 @@ async function hasUncommittedChanges(cwd: string): Promise<boolean> {
  *   2. set the `origin` remote from the returned URL (or via `gh repo view`),
  *   3. push with `git push -u origin HEAD`.
  *
- * This avoids the fragile flag combination entirely.
+ * When the name is already taken ("GraphQL: Name already exists on this
+ * account"), the name is retried with a numeric suffix (`name-2`, `name-3`, …)
+ * instead of failing the whole backup.
  */
 async function createRepoWithRemote(name: string, cwd: string): Promise<string> {
-    await run('gh', ['repo', 'create', name, '--private'], cwd);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const candidate = attempt === 1 ? name : `${name}-${attempt}`;
+        try {
+            await run('gh', ['repo', 'create', candidate, '--private'], cwd);
 
-    // Resolve the remote URL for the newly created repo.
-    let originUrl = await runOrEmpty('gh', ['repo', 'view', name, '--json', 'url', '--jq', '.url'], cwd);
-    if (!originUrl) {
-        // Fall back to the authenticated user's namespace.
-        const userJson = await runOrEmpty('gh', ['api', 'user', '--jq', '.login'], cwd);
-        const login = userJson.trim();
-        if (!login) throw new Error('Could not resolve the new repository URL after creating it.');
-        originUrl = `https://github.com/${login}/${name}.git`;
-    }
+            // Resolve the remote URL for the newly created repo.
+            let originUrl = await runOrEmpty('gh', ['repo', 'view', candidate, '--json', 'url', '--jq', '.url'], cwd);
+            if (!originUrl) {
+                // Fall back to the authenticated user's namespace.
+                const userJson = await runOrEmpty('gh', ['api', 'user', '--jq', '.login'], cwd);
+                const login = userJson.trim();
+                if (!login) throw new Error('Could not resolve the new repository URL after creating it.');
+                originUrl = `https://github.com/${login}/${candidate}.git`;
+            }
 
-    // Ensure we have a remote "origin" pointing at the new repo, then push.
-    if (!(await currentRemote(cwd))) {
-        await run('git', ['remote', 'add', 'origin', originUrl], cwd);
+            // Ensure we have a remote "origin" pointing at the new repo, then push.
+            if (!(await currentRemote(cwd))) {
+                await run('git', ['remote', 'add', 'origin', originUrl], cwd);
+            }
+            await ensureHeadForPush(cwd);
+            await run('git', ['push', '--set-upstream', 'origin', 'HEAD'], cwd);
+            return candidate;
+        } catch (error) {
+            lastError = error;
+            if (!isRepoNameCollision(error)) throw error;
+        }
     }
-    await run('git', ['push', '--set-upstream', 'origin', 'HEAD'], cwd);
-    return name;
+    throw new Error(`Repository name "${name}" is already taken and no suffix worked: ${String(lastError)}`);
 }
 
 /**
@@ -135,8 +169,8 @@ export async function backupWorkspaceToGitHub(cwd: string, repoName: string): Pr
             }
         }
         const name = repoName.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 100) || 'coding-agent-backup';
-        await createRepoWithRemote(name, cwd);
-        return { ok: true, action: 'created-repo', message: `Created GitHub repository "${name}" and pushed.` };
+        const created = await createRepoWithRemote(name, cwd);
+        return { ok: true, action: 'created-repo', message: `Created GitHub repository "${created}" and pushed.` };
     }
 
     if (!(await hasUncommittedChanges(cwd))) {
@@ -150,6 +184,7 @@ export async function backupWorkspaceToGitHub(cwd: string, repoName: string): Pr
         if (!String(error).toLowerCase().includes('nothing to commit')) throw error;
     }
 
+    await ensureHeadForPush(cwd);
     await run('git', ['push', '--set-upstream', 'origin', 'HEAD'], cwd);
     return { ok: true, action: 'pushed', message: 'Backed up to GitHub.' };
 }

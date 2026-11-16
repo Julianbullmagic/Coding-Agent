@@ -83,6 +83,18 @@ export function nextCollisionName(base: string, attempt: number): string {
     return `${base}-${attempt}`;
 }
 
+/**
+ * Pushing `HEAD` from a repository with no commits fails with
+ * "error: src refspec HEAD does not match any" because HEAD is unborn. This
+ * happens when the workspace is empty and the initial commit was skipped with
+ * "nothing to commit". An empty commit makes the push always succeed.
+ */
+async function ensureHeadForPush(cwd: string): Promise<void> {
+    if (!(await hasCommits(cwd))) {
+        await run('git', ['commit', '--allow-empty', '-m', 'Initial commit'], cwd);
+    }
+}
+
 async function ghCreateRepo(name: string, cwd: string): Promise<void> {
     if (!cwd || !cwd.trim()) {
         throw new Error('Cannot create a GitHub repository without a valid workspace path.');
@@ -106,6 +118,7 @@ async function ghCreateRepo(name: string, cwd: string): Promise<void> {
     if (!(await currentRemote(cwd)) && originUrl) {
         await run('git', ['remote', 'add', 'origin', originUrl], cwd);
     }
+    await ensureHeadForPush(cwd);
     await run('git', ['push', '--set-upstream', 'origin', 'HEAD'], cwd);
 }
 
@@ -163,10 +176,11 @@ export async function ensureRepoOnOpen(cwd: string, folderName: string): Promise
         await run('git', ['init', '-b', 'main'], cwd);
     }
 
-    // Create the repo as *private* (never fall back to public).
-    // If there are no commits yet, push an empty first commit so GitHub
-    // accepts the push; otherwise push the existing history.
-    if (!(await hasCommits(cwd))) {
+    // Commit any existing files so there is something to push; empty workspaces
+    // get an empty commit inside ghCreateRepo/ensureHeadForPush.
+    if (await hasCommits(cwd)) {
+        // existing history: nothing extra needed
+    } else {
         await run('git', ['add', '-A'], cwd);
         try {
             await run('git', ['commit', '-m', 'Initial commit'], cwd);
