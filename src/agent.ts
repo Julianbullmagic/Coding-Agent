@@ -804,7 +804,17 @@ export class CodingAgent {
                 if (provider === 'glm') {
                     return await fetchPageDirect(args.url);
                 }
-                return await fetchPageDeepSeek(apiKey, args.url);
+                try {
+                    return await fetchPageDeepSeek(apiKey, args.url);
+                } catch (hostedError) {
+                    // Fall back to direct fetching when the hosted endpoint
+                    // is unavailable or the request fails.
+                    try {
+                        return await fetchPageDirect(args.url);
+                    } catch {
+                        throw hostedError;
+                    }
+                }
             } else if (name === 'run_command' && typeof args.command === 'string') {
                 const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 120000;
                 return await runShellCommand(workspacePath, args.command, timeoutMs);
