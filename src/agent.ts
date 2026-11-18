@@ -431,7 +431,8 @@ export function interpretDeepSeekError(message: string): string {
 /**
  * Run a JSON request with a bounded retry for transient failures: rate
  * limits, temporary server errors (5xx), and short billing hiccups such as
- * "Insufficient Balance" that resolve once the account is topped up.
+ * "Insufficient Balance" that resolve once the account is topped up, as
+ * well as transient DNS/connection failures (ENOTFOUND, ECONNRESET).
  * Permanent errors (auth, unknown model) surface immediately with a
  * diagnosis via interpretDeepSeekError.
  */
@@ -449,7 +450,7 @@ async function requestJsonWithRetry<T>(
             lastError = error;
             const message = error instanceof Error ? error.message : String(error);
             const lower = message.toLowerCase();
-            const isTransient = /insufficient balance|rate limit|429|http 5\d\d|server error|timed out/i.test(lower);
+            const isTransient = /insufficient balance|rate limit|429|http 5\d\d|server error|timed out|enotfound|eai_again|econnreset|epipe|econnaborted/i.test(lower);
             if (!isTransient || attempt === maxAttempts) {
                 throw new Error(interpretDeepSeekError(message));
             }
