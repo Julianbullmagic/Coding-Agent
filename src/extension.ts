@@ -580,6 +580,9 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
 
     private async stopQueue(view: vscode.WebviewView): Promise<void> {
         await this.context.workspaceState.update(PROMPT_QUEUE_STOP_KEY, true);
+        // Interrupt the in-flight run immediately: abort the current model
+        // request / shell command, not just the remaining queue items.
+        this.agent.cancel();
         this.postState(view);
     }
 
@@ -692,6 +695,11 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             await this.save(conv.id, [...messages, { role: 'assistant', content: response.trim() }]);
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unknown error';
+            if (/was cancelled by the user|was cancelled/i.test(detail)) {
+                await this.save(conv.id, [...messages, { role: 'assistant', content: '⏹ Stopped by user.' }]);
+                this.postState(view);
+                return;
+            }
             const source = classifySource(error);
             await recordError(this.context, source, error);
             await this.save(conv.id, [...messages, { role: 'assistant', content: `Request failed: ${detail}` }]);

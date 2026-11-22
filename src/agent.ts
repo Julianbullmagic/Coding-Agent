@@ -328,8 +328,12 @@ export function buildRequestBody(prompt: string, modelId: string = 'deepseek-v4-
     });
 }
 
-function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
+function requestJson<T>(url: URL, body?: string, apiKey?: string, signal?: AbortSignal): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new Error('The request was cancelled.'));
+            return;
+        }
         const headers: http.OutgoingHttpHeaders = { Accept: 'application/json' };
         if (body !== undefined) {
             headers['Content-Type'] = 'application/json';
@@ -370,6 +374,14 @@ function requestJson<T>(url: URL, body?: string, apiKey?: string): Promise<T> {
             ? https.request(url, options, onResponse)
             : http.request(url, options, onResponse);
         request.setTimeout(300_000, () => request.destroy(new Error('Web request timed out.')));
+        const onAbort = () => {
+            request.destroy(new Error('The request was cancelled.'));
+        };
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+            request.on('close', () => signal.removeEventListener('abort', onAbort));
+        }
         request.on('error', (error) => {
             const message = error instanceof Error ? error.message : String(error);
             if (/timed out|timeout/i.test(message)) {
@@ -441,21 +453,34 @@ async function requestJsonWithRetry<T>(
     body: string | undefined,
     apiKey: string | undefined,
     maxAttempts: number = 3,
+    signal?: AbortSignal,
 ): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (signal?.aborted) {
+            throw new Error('The request was cancelled.');
+        }
         try {
-            return await requestJson<T>(url, body, apiKey);
+            return await requestJson<T>(url, body, apiKey, signal);
         } catch (error) {
             lastError = error;
             const message = error instanceof Error ? error.message : String(error);
             const lower = message.toLowerCase();
+            if (signal?.aborted) {
+                throw new Error('The request was cancelled.');
+            }
             const isTransient = /insufficient balance|rate limit|429|http 5\d\d|server error|timed out|enotfound|eai_again|econnreset|epipe|econnaborted/i.test(lower);
             if (!isTransient || attempt === maxAttempts) {
                 throw new Error(interpretDeepSeekError(message));
             }
             // Small backoff before retrying a transient failure.
-            await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+            await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 500 * attempt);
+                signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(undefined); }, { once: true });
+            });
+            if (signal?.aborted) {
+                throw new Error('The request was cancelled.');
+            }
         }
     }
     throw new Error(interpretDeepSeekError(lastError instanceof Error ? lastError.message : String(lastError)));
@@ -520,28 +545,59 @@ function runProcess(command: string, args: string[], cwd: string): Promise<strin
     });
 }
 
-function runShellCommand(workspacePath: string, command: string, timeoutMs: number): Promise<string> {
+function runShellCommand(workspacePath: string, command: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
     return new Promise<string>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new Error('The command was cancelled.'));
+            return;
+        }
         const normalized = Math.max(1000, Math.min(600000, Math.floor(timeoutMs || 120000)));
         const isWindows = process.platform === 'win32';
+        // cmd.exe cannot execute commands containing literal newlines and
+        // rejects the whole invocation with "The syntax of the command is
+        // incorrect." Convert multi-line commands into a single line joined
+        // with " & " (cmd's command separator) so chained lines still run.
+        const shellCommand = isWindows
+            ? command.replace(/\r?\n/g, ' & ')
+            : command;
         const child = spawn(
             isWindows ? 'cmd.exe' : '/bin/sh',
-            isWindows ? ['/d', '/s', '/c', command] : ['-c', command],
+            isWindows ? ['/d', '/s', '/c', shellCommand] : ['-c', shellCommand],
             { cwd: workspacePath, env: process.env, windowsHide: true },
         );
         let stdout = '';
         let stderr = '';
         let timedOut = false;
         const timer = setTimeout(() => { timedOut = true; child.kill(); }, normalized);
+        const onAbort = () => { timedOut = false; child.kill(); reject(new Error('The command was cancelled.')); };
+        if (signal) {
+            if (signal.aborted) { onAbort(); return; }
+            signal.addEventListener('abort', onAbort, { once: true });
+        }
         const cap = (value: string): string => value.length > 200000 ? value.slice(-200000) : value;
         child.stdout?.on('data', (chunk: Buffer | string) => { stdout = cap(stdout + chunk.toString()); });
         child.stderr?.on('data', (chunk: Buffer | string) => { stderr = cap(stderr + chunk.toString()); });
         child.once('error', (error) => { clearTimeout(timer); reject(error); });
         child.once('close', (code) => {
             clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            if (signal?.aborted) {
+                reject(new Error('The command was cancelled.'));
+                return;
+            }
             const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n');
             if (timedOut) reject(new Error(`Command timed out after ${normalized} ms.`));
             else if (code === 0) resolve(combined || 'Command completed with no output.');
+            else if (/syntax of the command is incorrect/i.test(combined)) {
+                reject(new Error([
+                    combined,
+                    '',
+                    'Diagnosis: the shell is Windows cmd.exe (not bash). It rejected the command as written.',
+                    'Fix: use cmd-compatible syntax on a single line. Common pitfalls: use "dir" not "ls",',
+                    '"type" not "cat", "\\" path separators, "&&" to chain commands, and quote the whole',
+                    'command carefully (cmd strips quotes differently than bash).',
+                ].join('\n')));
+            }
             else reject(new Error(combined || `Command exited with code ${code ?? 'unknown'}.`));
         });
     });
@@ -756,6 +812,17 @@ export class CodingAgent {
     private progressHandler?: (message: string) => void;
     private deepseekModelId: string;
     private glmModelId: string;
+    private abortController?: AbortController;
+
+    // Cancel the in-flight run: the current HTTP request is aborted, spawned
+    // shell commands are killed, and the tool loop throws at the next check.
+    cancel(): void {
+        this.abortController?.abort();
+    }
+
+    isCancelled(): boolean {
+        return this.abortController?.signal.aborted ?? false;
+    }
 
     constructor(
         deepseekModelId: string = 'deepseek-v4-pro',
@@ -788,6 +855,10 @@ export class CodingAgent {
         this.progressHandler = handler;
     }
 
+    private static isCancelledError(message: string): boolean {
+        return /was cancelled|cancelled by the user|abort/i.test(message);
+    }
+
     private emitProgress(message: string): void {
         try {
             this.progressHandler?.(message);
@@ -797,7 +868,7 @@ export class CodingAgent {
     }
 
     // Execute a single named tool and return its result as a JSON-ish string.
-    private async executeTool(name: string, rawArgs: string, workspacePath: string, apiKey: string, provider: Provider, searxngBaseUrl: string): Promise<string> {
+    private async executeTool(name: string, rawArgs: string, workspacePath: string, apiKey: string, provider: Provider, searxngBaseUrl: string, signal?: AbortSignal): Promise<string> {
         let args: Record<string, unknown>;
         try {
             args = JSON.parse(rawArgs || '{}') as Record<string, unknown>;
@@ -834,7 +905,7 @@ export class CodingAgent {
                 }
             } else if (name === 'run_command' && typeof args.command === 'string') {
                 const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 120000;
-                return await runShellCommand(workspacePath, args.command, timeoutMs);
+                return await runShellCommand(workspacePath, args.command, timeoutMs, signal);
             } else if (name === 'sign_in_to_github') {
                 return await signInToGitHub(workspacePath);
             } else if (name === 'create_github_repository') {
@@ -912,8 +983,10 @@ export class CodingAgent {
 
         const instructions = this.scopedInstructions(workspacePath);
         const model = resolveProvider('deepseek', this.deepseekModelId).model;
+        const signal = (this.abortController = new AbortController()).signal;
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            if (signal.aborted) throw new Error('The request was cancelled by the user.');
             this.emitProgress(round === 0 ? 'Working on your request…' : `Step ${round + 1}: thinking…`);
             const requestBody: string = JSON.stringify({
                 model,
@@ -928,7 +1001,10 @@ export class CodingAgent {
                 new URL('https://api.deepseek.com/responses'),
                 requestBody,
                 apiKey,
+                3,
+                signal,
             );
+            if (signal.aborted) throw new Error('The request was cancelled by the user.');
             if (!response) {
                 throw new Error('DeepSeek returned an empty response body.');
             }
@@ -955,7 +1031,7 @@ export class CodingAgent {
             const prev: ResponseOutputItem[] = typeof input === 'string' ? [{ role: 'user', content: input }] : input;
 
             const toolOutputs: ResponseOutputItem[] = await Promise.all(calls.map(async (call: ResponseOutputItem): Promise<ResponseOutputItem> => {
-                const result = await this.executeTool(call.name ?? '', call.arguments ?? '{}', workspacePath, apiKey, 'deepseek', searxngBaseUrl);
+                const result = await this.executeTool(call.name ?? '', call.arguments ?? '{}', workspacePath, apiKey, 'deepseek', searxngBaseUrl, signal);
                 return { type: 'function_call_output', call_id: call.call_id ?? '', output: result };
             }));
 
@@ -1003,7 +1079,9 @@ export class CodingAgent {
             { role: 'user', content: prompt },
         ];
 
+        const signal = (this.abortController = new AbortController()).signal;
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            if (signal.aborted) throw new Error('The request was cancelled by the user.');
             this.emitProgress(round === 0 ? 'Working on your request…' : `Step ${round + 1}: thinking…`);
             let response: GlmCompletionResponse;
             let attempts = 0;
@@ -1026,10 +1104,15 @@ export class CodingAgent {
                         endpoint,
                         requestBody,
                         apiKey,
+                        3,
+                        signal,
                     );
                     break;
                 } catch (error) {
                     const detail = error instanceof Error ? error.message : String(error);
+                    if (signal.aborted) {
+                        throw new Error('The request was cancelled by the user.');
+                    }
                     // Only timeouts are worth retrying/fallback; hard errors
                     // (auth, quota, unknown model) should surface immediately.
                     const isTimeout = /timed out|timeout/i.test(detail);
@@ -1069,7 +1152,8 @@ export class CodingAgent {
             for (const toolCall of toolCalls) {
                 const toolName = toolCall.function?.name ?? '';
                 const rawArgs = toolCall.function?.arguments ?? '{}';
-                const result = await this.executeTool(toolName, rawArgs, workspacePath, apiKey, 'glm', searxngBaseUrl);
+                if (signal.aborted) throw new Error('The request was cancelled by the user.');
+                const result = await this.executeTool(toolName, rawArgs, workspacePath, apiKey, 'glm', searxngBaseUrl, signal);
                 messages.push({ role: 'tool', content: result, tool_call_id: toolCall.id });
             }
         }
