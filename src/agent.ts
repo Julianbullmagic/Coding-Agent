@@ -753,6 +753,7 @@ async function searchSearxng(query: string, baseUrl: string): Promise<string> {
 }
 
 export class CodingAgent {
+    private progressHandler?: (message: string) => void;
     private deepseekModelId: string;
     private glmModelId: string;
 
@@ -778,6 +779,21 @@ export class CodingAgent {
 
     getModel(provider: Provider = 'deepseek'): string {
         return provider === 'glm' ? this.glmModelId : this.deepseekModelId;
+    }
+
+    // Optional callback invoked with short human-readable status lines while
+    // the agent loop runs (thinking, running tools). The UI forwards these to
+    // the user so long turns do not look stuck.
+    setProgressHandler(handler: ((message: string) => void) | undefined): void {
+        this.progressHandler = handler;
+    }
+
+    private emitProgress(message: string): void {
+        try {
+            this.progressHandler?.(message);
+        } catch {
+            // Progress reporting must never break the agent loop.
+        }
     }
 
     // Execute a single named tool and return its result as a JSON-ish string.
@@ -898,6 +914,7 @@ export class CodingAgent {
         const model = resolveProvider('deepseek', this.deepseekModelId).model;
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            this.emitProgress(round === 0 ? 'Working on your request…' : `Step ${round + 1}: thinking…`);
             const requestBody: string = JSON.stringify({
                 model,
                 instructions,
@@ -918,6 +935,11 @@ export class CodingAgent {
             const output: ResponseOutputItem[] = response.output ?? [];
             const calls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'function_call');
             const webCalls: ResponseOutputItem[] = output.filter((item: ResponseOutputItem) => item.type === 'web_search_call');
+            const toolNames = calls.map((c) => c.name || 'unknown_tool');
+            if (webCalls.length > 0) toolNames.push('web_search');
+            if (toolNames.length > 0) {
+                this.emitProgress(`Step ${round + 1}: running ${toolNames.join(', ')}`);
+            }
 
             if (calls.length === 0 && webCalls.length === 0) {
                 const text = getResponseText(response);
@@ -982,6 +1004,7 @@ export class CodingAgent {
         ];
 
         for (let round = 0; round <= normalizedMaxToolRounds; round += 1) {
+            this.emitProgress(round === 0 ? 'Working on your request…' : `Step ${round + 1}: thinking…`);
             let response: GlmCompletionResponse;
             let attempts = 0;
             // Allow one retry, and allow a fallback from the slow flagship
@@ -1040,6 +1063,9 @@ export class CodingAgent {
 
             messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls });
 
+            if (toolCalls.length > 0) {
+                this.emitProgress(`Step ${round + 1}: running ` + toolCalls.map((c: GlmToolCall) => c.function?.name || 'unknown_tool').join(', '));
+            }
             for (const toolCall of toolCalls) {
                 const toolName = toolCall.function?.name ?? '';
                 const rawArgs = toolCall.function?.arguments ?? '{}';
