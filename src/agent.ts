@@ -628,6 +628,23 @@ async function ensureGitHubIdentity(workspacePath: string): Promise<void> {
     await runProcess('git', ['config', '--local', 'user.email', email], workspacePath);
 }
 
+
+// Pushing HEAD from a repository with no commits fails with
+// "error: src refspec HEAD does not match any" because HEAD is unborn.
+// Mirror of ensureHeadForPush in src/repo-bootstrap.ts: make an empty commit
+// so the push always succeeds.
+async function ensureHeadForPush(workspacePath: string): Promise<void> {
+    let hasCommits = '';
+    try {
+        hasCommits = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], workspacePath);
+    } catch {
+        hasCommits = '';
+    }
+    if (!hasCommits.trim()) {
+        await runProcess('git', ['commit', '--allow-empty', '-m', 'Initial commit'], workspacePath);
+    }
+}
+
 async function createGitHubRepository(workspacePath: string, args: Record<string, unknown>): Promise<string> {
     const name = typeof args.name === 'string' ? args.name.trim() : '';
     if (!name || name.length > 100 || /[^A-Za-z0-9_.-]/.test(name)) {
@@ -677,6 +694,9 @@ async function createGitHubRepository(workspacePath: string, args: Record<string
     if (!currentRemote) {
         await runProcess('git', ['remote', 'add', 'origin', originUrl], workspacePath);
     }
+    // Pushing HEAD from an unborn branch fails with "src refspec HEAD does
+    // not match any"; make an empty commit first if needed.
+    await ensureHeadForPush(workspacePath);
     await runProcess('git', ['push', '--set-upstream', 'origin', 'HEAD'], workspacePath);
     return name;
 }
@@ -697,7 +717,11 @@ async function commitAndPush(workspacePath: string, args: Record<string, unknown
     }
     const branchArgs = ['push', '--set-upstream', remote];
     if (branch) branchArgs.push(branch);
-    else branchArgs.push('HEAD');
+    else {
+        branchArgs.push('HEAD');
+        // Guard against "src refspec HEAD does not match any" on an unborn branch.
+        await ensureHeadForPush(workspacePath);
+    }
     const pushOutput = await runProcess('git', branchArgs, workspacePath);
     return [commitOutput, pushOutput].filter(Boolean).join('\n');
 }
