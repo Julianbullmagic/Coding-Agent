@@ -1,1 +1,1 @@
-chore(backup): backup with vsix 0.3.12 - stop button, progress updates, cmd fix  
+chore: include v0.3.12 vsix in backup
