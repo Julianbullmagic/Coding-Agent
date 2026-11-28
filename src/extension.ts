@@ -645,6 +645,15 @@ class CodingAgentChatProvider implements vscode.WebviewViewProvider {
             } else {
                 await vscode.commands.executeCommand('codingAgent.setApiKey');
             }
+            // Tell the user in the chat why nothing ran, instead of failing
+            // silently (this previously looked like the prompt vanished --
+            // and meant no API request was ever sent for the provider).
+            let conv = this.active();
+            if (!conv) conv = await this.createConversation();
+            const messages = [...conv.messages, { role: 'user' as const, content: item.text }];
+            await this.save(conv.id, [...messages, { role: 'assistant' as const, content: provider === 'glm'
+                ? 'No GLM API key is saved, so no request was sent. Run "Coding Agent: Set GLM API Key" (Ctrl+Shift+P), paste a z.ai (international) key, then resend.'
+                : 'No DeepSeek API key is saved, so no request was sent. Run "Coding Agent: Set API Key" (Ctrl+Shift+P), paste your key, then resend.' }]);
             this.postState(view);
             return;
         }
