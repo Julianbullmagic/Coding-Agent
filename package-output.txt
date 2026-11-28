@@ -1,0 +1,13 @@
+Executing prepublish script 'npm run vscode:prepublish'...
+(node:25100) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+> coding-agent-extension@0.3.14 vscode:prepublish
+> npm run compile
+
+
+> coding-agent-extension@0.3.14 compile
+> tsc -p ./
+
+ WARNING  A 'repository' field is missing from the 'package.json' manifest file.
+ DONE  Packaged: c:\Users\admin\Documents\coding-agent-extension\coding-agent-extension-0.3.14.vsix (31 files, 94.78KB)
